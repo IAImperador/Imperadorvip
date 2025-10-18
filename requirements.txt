@@ -2,4 +2,4 @@ fastapi
 uvicorn
 websocket-client
 iqoptionapi
-git+https://github.com/Alyxux/quotexapi.git@main#egg=quotexapi
+https://github.com/felipefgoncalves/quotexapi/archive/refs/heads/main.zip
