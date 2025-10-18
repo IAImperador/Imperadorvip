@@ -1,6 +1,7 @@
 fastapi
 uvicorn
 websocket-client
-rel
-requests
-pandas
+
+# APIs não-oficiais; podem mudar entre versões/regiões:
+iqoptionapi
+quotexapi
