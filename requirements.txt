@@ -1,7 +1,5 @@
 fastapi
 uvicorn
 websocket-client
-
-# APIs não-oficiais; podem mudar entre versões/regiões:
 iqoptionapi
-quotexapi
+git+https://github.com/davidz2010/quotexapi.git
