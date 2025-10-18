@@ -2,3 +2,4 @@ fastapi
 uvicorn
 websockets
 requests
+websocket-client
