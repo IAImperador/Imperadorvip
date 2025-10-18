@@ -1,6 +1,6 @@
 fastapi
 uvicorn
-websockets
 requests
+websockets
 websocket-client
 rel
