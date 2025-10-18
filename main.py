@@ -1,28 +1,32 @@
-import websocket
+from fastapi import FastAPI
 import json
 import threading
 import time
-from fastapi import FastAPI
+import websocket
 import uvicorn
-import rel
 
-app = FastAPI()
+app = FastAPI(title="ImperadorVIP - Global Signal Engine")
 
-# Configuração Quotex
+# -------------------------------
+# CONFIGURAÇÃO GERAL
+# -------------------------------
 QUOTEX_WS_URL = "wss://ws.quotex.io/socket.io/"
 EMAIL = "seu_email@example.com"
 PASSWORD = "sua_senha"
 
-# Dados em tempo real
 current_prices = {}
 current_candles = {}
 ws_connection = None
+connected = False
 
+# -------------------------------
+# FUNÇÕES DE CALLBACK
+# -------------------------------
 def on_message(ws, message):
-    """Processar mensagens do WebSocket"""
+    """Processar mensagens recebidas"""
+    global current_prices, current_candles
     try:
         data = json.loads(message)
-        
         if "asset" in data and "price" in data:
             asset = data["asset"]
             current_prices[asset] = {
@@ -30,12 +34,11 @@ def on_message(ws, message):
                 "timestamp": time.time()
             }
             print(f"✅ Preço atualizado: {asset} = {data['price']}")
-        
-        if "candle" in data:
+
+        elif "candle" in data:
             asset = data["candle"]["asset"]
             if asset not in current_candles:
                 current_candles[asset] = []
-            
             current_candles[asset].append({
                 "open": data["candle"]["open"],
                 "high": data["candle"]["high"],
@@ -44,25 +47,28 @@ def on_message(ws, message):
                 "volume": data["candle"].get("volume", 0),
                 "time": data["candle"]["time"]
             })
-            
+            # limitar a 100 candles
             if len(current_candles[asset]) > 100:
                 current_candles[asset] = current_candles[asset][-100:]
-                
     except Exception as e:
-        print(f"Erro: {e}")
+        print(f"Erro ao processar mensagem: {e}")
 
 def on_error(ws, error):
     print(f"❌ Erro WebSocket: {error}")
 
 def on_close(ws, close_status_code, close_msg):
-    print(f"⚠️ Conexão fechada: {close_status_code}")
-    print("🔄 Tentando reconectar em 5 segundos...")
+    global connected
+    connected = False
+    print(f"⚠️ Conexão fechada: {close_status_code}. Tentando reconectar em 5s...")
     time.sleep(5)
     connect_websocket()
 
 def on_open(ws):
+    global connected
+    connected = True
     print("✅ Conectado ao WebSocket da Quotex!")
     
+    # autenticação
     auth_message = {
         "type": "auth",
         "email": EMAIL,
@@ -70,6 +76,7 @@ def on_open(ws):
     }
     ws.send(json.dumps(auth_message))
     
+    # inscrição nos pares desejados
     assets = ["EURUSD", "GBPUSD", "USDJPY", "BTCUSD"]
     for asset in assets:
         subscribe_message = {
@@ -80,60 +87,64 @@ def on_open(ws):
         ws.send(json.dumps(subscribe_message))
         print(f"📊 Assinado: {asset}")
 
+# -------------------------------
+# CONEXÃO WEBSOCKET
+# -------------------------------
 def connect_websocket():
     global ws_connection
-    
-    ws_connection = websocket.WebSocketApp(
-        QUOTEX_WS_URL,
-        on_open=on_open,
-        on_message=on_message,
-        on_error=on_error,
-        on_close=on_close
-    )
-    
-    ws_connection.run_forever(
-        dispatcher=rel,
-        reconnect=5
-    )
-    rel.signal(2, rel.abort)
-    rel.dispatch()
+    try:
+        ws_connection = websocket.WebSocketApp(
+            QUOTEX_WS_URL,
+            on_open=on_open,
+            on_message=on_message,
+            on_error=on_error,
+            on_close=on_close
+        )
+        # Removemos completamente o `rel` — agora é estável no Railway
+        ws_connection.run_forever(reconnect=5)
+    except Exception as e:
+        print(f"Erro ao conectar WebSocket: {e}")
 
+# -------------------------------
+# INICIALIZAÇÃO EM THREAD
+# -------------------------------
 @app.on_event("startup")
 async def startup():
-    ws_thread = threading.Thread(target=connect_websocket, daemon=True)
-    ws_thread.start()
+    thread = threading.Thread(target=connect_websocket, daemon=True)
+    thread.start()
     print("🚀 WebSocket iniciado em background")
 
-@app.get("/price/{asset}")
-async def get_price(asset: str):
-    if asset in current_prices:
-        return {
-            "asset": asset,
-            "price": current_prices[asset]["price"],
-            "timestamp": current_prices[asset]["timestamp"]
-        }
-    return {"error": "Asset not found"}
-
-@app.get("/candles/{asset}")
-async def get_candles(asset: str):
-    if asset in current_candles:
-        return {
-            "asset": asset,
-            "candles": current_candles[asset]
-        }
-    return {"error": "Asset not found"}
+# -------------------------------
+# ROTAS FASTAPI
+# -------------------------------
+@app.get("/health")
+def health():
+    return {"status": "ok"}
 
 @app.get("/status")
-async def get_status():
+def get_status():
     return {
-        "connected": ws_connection is not None,
+        "connected": connected,
         "assets_tracking": list(current_prices.keys()),
         "total_candles": sum(len(v) for v in current_candles.values())
     }
 
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
+@app.get("/price/{asset}")
+def get_price(asset: str):
+    asset = asset.upper()
+    if asset in current_prices:
+        return current_prices[asset]
+    return {"error": "Asset not found"}
 
+@app.get("/candles/{asset}")
+def get_candles(asset: str):
+    asset = asset.upper()
+    if asset in current_candles:
+        return {"candles": current_candles[asset]}
+    return {"error": "Asset not found"}
+
+# -------------------------------
+# EXECUÇÃO LOCAL
+# -------------------------------
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
