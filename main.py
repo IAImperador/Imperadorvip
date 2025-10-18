@@ -1,358 +1,315 @@
-# -*- coding: utf-8 -*-
-from fastapi import FastAPI, Body
-from pydantic import BaseModel
-from typing import Dict, List, Optional
-import threading, time, json, os
-import requests
-import websocket  # websocket-client
-import pandas as pd
-import numpy as np
+import os
+import json
+import time
+import threading
+from typing import Dict, Any, Optional
+from fastapi import FastAPI, BackgroundTasks
+from pydantic import BaseModel, Field
 
-# ====== CONFIGURAÇÕES GERAIS ======
-APP_TITLE = "ImperadorVIP - Global Signal Engine (Public Feeds)"
-app = FastAPI(title=APP_TITLE)
+# -----------------------------
+# App
+# -----------------------------
+app = FastAPI(title="ImperadorVIP - Global Signal Engine (Public + Auth)")
 
-# --- Modo de operação ---
-AUTO_MODE = False  # alterna via /mode/{state}
+# -----------------------------
+# Feeds públicos (Deriv)
+# -----------------------------
+from websocket import WebSocketApp  # pacote: websocket-client
 
-# --- Telegram (preencha para ativar) ---
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "COLOQUE_SEU_TOKEN_AQUI")
-TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID",   "COLOQUE_SEU_CHATID_AQUI")
+DERIV_WS_URL = "wss://ws.binaryws.com/websockets/v3?app_id=1089"
+DERIV_SYMBOLS = [
+    # Synthetics + Crypto que você já estava usando
+    "CRASH900", "BOOM1000", "CRASH1000", "BOOM600", "BOOM300N",
+    "CRASH600", "RDBULL", "cryETHUSD", "CRASH500", "BOOM900",
+    "cryBTCUSD", "CRASH300N", "RDBEAR", "BOOM500"
+]
 
-# --- Base44 (opcional) ---
-BASE44_SIGNALS_URL = os.getenv("BASE44_SIGNALS_URL", "")  # ex: https://suaapi.base44/sinais
+deriv_prices: Dict[str, Dict[str, Any]] = {}
+_deriv_ws: Optional[WebSocketApp] = None
+_deriv_connected = False
 
-# --- Thresholds de sinal ---
-MIN_CONFLUENCES = int(os.getenv("MIN_CONFLUENCES", "3"))
-MIN_SCORE       = float(os.getenv("MIN_SCORE", "0.6"))
 
-# --- Feeds públicos ativados ---
-ENABLE_DERIV   = True   # público: wss deriv
-ENABLE_QUOTEX  = False  # NÃO público (stub desativado)
-ENABLE_IQ      = False  # NÃO público (stub desativado)
-
-# --- Universo de ativos (Deriv) ---
-# Se quiser tudo, mantenha vazio e o sistema assina um subconjunto popular.
-DERIV_ASSETS_WHITELIST: List[str] = []   # ex: ["frxEURUSD", "frxGBPUSD", "cryBTCUSD"]
-
-# ====== ESTADOS EM MEMÓRIA ======
-latest_prices: Dict[str, float] = {}             # {symbol: price}
-last_update_ts: Dict[str, float] = {}            # {symbol: ts}
-candles: Dict[str, List[Dict]] = {}              # {symbol: [ {t,o,h,l,c} ]}
-signals_feed: List[Dict] = []                    # sinalizações geradas
-status_flags = {
-    "deriv_connected": False,
-    "quotex_connected": False,
-    "iq_connected": False
-}
-
-CANDLE_SECONDS = 60  # 1m candles
-MAX_CANDLES    = 200
-
-# ====== UTIL ======
-def now_ts() -> float:
-    return time.time()
-
-def send_telegram(text: str) -> None:
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID or "COLOQUE" in TELEGRAM_BOT_TOKEN:
-        print("[TELEGRAM] Token/ChatID não configurado. Ignorando envio.")
-        return
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}, timeout=10)
-    except Exception as e:
-        print(f"[TELEGRAM] erro ao enviar: {e}")
-
-def post_base44(payload: Dict) -> None:
-    if not BASE44_SIGNALS_URL:
-        return
-    try:
-        requests.post(BASE44_SIGNALS_URL, json=payload, timeout=10)
-    except Exception as e:
-        print(f"[BASE44] erro ao postar sinal: {e}")
-
-def ensure_symbol_books(symbol: str):
-    if symbol not in candles:
-        candles[symbol] = []
-
-# ====== CONSTRUÇÃO DE CANDLE A PARTIR DE TICKS ======
-def apply_tick(symbol: str, price: float, ts: Optional[float] = None):
-    t = ts or now_ts()
-    latest_prices[symbol] = price
-    last_update_ts[symbol] = t
-    ensure_symbol_books(symbol)
-
-    # bucket de 1 minuto
-    bucket = int(t // CANDLE_SECONDS) * CANDLE_SECONDS
-
-    book = candles[symbol]
-    if not book or book[-1]["t"] != bucket:
-        # inicia nova vela
-        book.append({"t": bucket, "o": price, "h": price, "l": price, "c": price})
-        if len(book) > MAX_CANDLES:
-            del book[:-MAX_CANDLES]
-    else:
-        v = book[-1]
-        v["h"] = max(v["h"], price)
-        v["l"] = min(v["l"], price)
-        v["c"] = price
-
-# ====== INDICADORES & CONFLUÊNCIAS ======
-def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    # df: columns = [t,o,h,l,c]
-    out = df.copy()
-    # EMA9 / EMA21
-    out["ema9"]  = out["c"].ewm(span=9, adjust=False).mean()
-    out["ema21"] = out["c"].ewm(span=21, adjust=False).mean()
-    # RSI14
-    delta = out["c"].diff()
-    gain  = (delta.clip(lower=0)).ewm(alpha=1/14, adjust=False).mean()
-    loss  = (-delta.clip(upper=0)).ewm(alpha=1/14, adjust=False).mean()
-    rs    = gain / (loss.replace(0, np.nan))
-    out["rsi14"] = 100 - (100 / (1 + rs))
-    out["rsi14"] = out["rsi14"].fillna(method="bfill").fillna(50)
-    return out
-
-def detect_engulfing(df: pd.DataFrame) -> Optional[str]:
-    # very simple engulfing on last two candles
-    if len(df) < 2:
-        return None
-    a = df.iloc[-2]
-    b = df.iloc[-1]
-    # bullish engulfing
-    if (a["c"] < a["o"]) and (b["c"] > b["o"]) and (b["c"] >= a["o"]) and (b["o"] <= a["c"]):
-        return "bullish"
-    # bearish engulfing
-    if (a["c"] > a["o"]) and (b["c"] < b["o"]) and (b["c"] <= a["o"]) and (b["o"] >= a["c"]):
-        return "bearish"
-    return None
-
-def build_signal_from_confluences(symbol: str) -> Optional[Dict]:
-    book = candles.get(symbol, [])
-    if len(book) < 25:
-        return None
-    df = pd.DataFrame(book)[["t","o","h","l","c"]]
-    ind = compute_indicators(df)
-    last = ind.iloc[-1]
-
-    confluences = []
-    # Tendência por EMAs
-    if last["ema9"] > last["ema21"]:
-        confluences.append("trend_up")
-    elif last["ema9"] < last["ema21"]:
-        confluences.append("trend_down")
-
-    # RSI zonas
-    if last["rsi14"] < 30:
-        confluences.append("rsi_oversold")
-    elif last["rsi14"] > 70:
-        confluences.append("rsi_overbought")
-
-    # Engulfing
-    engulf = detect_engulfing(ind)
-    if engulf == "bullish":
-        confluences.append("bullish_engulfing")
-    elif engulf == "bearish":
-        confluences.append("bearish_engulfing")
-
-    # direcionalidade simples
-    direction = None
-    if "trend_up" in confluences or "bullish_engulfing" in confluences:
-        direction = "CALL"
-    if "trend_down" in confluences or "bearish_engulfing" in confluences:
-        # se houver sinais opostos, desempata por EMA
-        direction = "PUT" if last["ema9"] <= last["ema21"] else direction
-
-    score = min(1.0, (len(confluences) / 5.0) + (0.1 if direction else 0.0))
-    if len(confluences) >= MIN_CONFLUENCES and score >= MIN_SCORE and direction:
-        sig = {
-            "symbol": symbol,
-            "direction": direction,
-            "score": round(score, 3),
-            "confluences": confluences,
-            "ts": int(now_ts()),
-            "price": float(latest_prices.get(symbol, float('nan')))
-        }
-        return sig
-    return None
-
-def maybe_emit_signal(symbol: str):
-    sig = build_signal_from_confluences(symbol)
-    if not sig:
-        return
-    # guarda no feed
-    signals_feed.append(sig)
-    if len(signals_feed) > 200:
-        del signals_feed[:-200]
-
-    # mensagem
-    msg = (
-        f"📡 <b>Signal</b>\n"
-        f"Ativo: <b>{sig['symbol']}</b>\n"
-        f"Direção: <b>{sig['direction']}</b>\n"
-        f"Score: <b>{sig['score']}</b>\n"
-        f"Confluências: {', '.join(sig['confluences'])}\n"
-        f"Preço: {sig['price']}"
-    )
-
-    # Auto vs Manual
-    if AUTO_MODE:
-        send_telegram(msg)
-        post_base44(sig)
-        print("[AUTO] Sinal enviado para Telegram/Base44.")
-    else:
-        print("[MANUAL] Sinal disponível no feed (use /signals).")
-
-# ====== ADAPTER: DERIV (PÚBLICO) ======
-def deriv_on_message(ws, message):
+def _deriv_on_message(ws, message: str):
     try:
         data = json.loads(message)
-        # active_symbols result
-        if data.get("active_symbols"):
-            # filtra símbolos (forex/crypto/índices)
-            syms = []
-            for s in data["active_symbols"]:
-                if DERIV_ASSETS_WHITELIST and s["symbol"] not in DERIV_ASSETS_WHITELIST:
-                    continue
-                if s.get("market") in ("forex", "cryptocurrency", "synthetic_index", "indices"):
-                    syms.append(s["symbol"])
-            # limita para não sobrecarregar
-            syms = syms[:40] if len(syms) > 40 else syms
-            for sym in syms:
-                ws.send(json.dumps({"ticks": sym, "subscribe": 1}))
-            print(f"[DERIV] Subscribed to {len(syms)} symbols.")
-            return
-
-        # ticks
-        if data.get("tick"):
-            sym = data["tick"]["symbol"]
-            price = float(data["tick"]["quote"])
-            ts = data["tick"]["epoch"]
-            # converte símbolo deriv -> padrão (mantemos original)
-            apply_tick(sym, price, ts)
-            # tenta gerar sinal
-            maybe_emit_signal(sym)
+        # tick stream response example: {"tick":{"symbol":"R_100","quote":123.45,"epoch":...}, "subscription": {...}}
+        if "tick" in data and isinstance(data["tick"], dict):
+            sym = data["tick"].get("symbol")
+            quote = data["tick"].get("quote")
+            epoch = data["tick"].get("epoch")
+            if sym and quote is not None:
+                deriv_prices[sym] = {"price": quote, "ts": epoch}
     except Exception as e:
         print(f"[DERIV on_message] {e}")
 
-def deriv_on_open(ws):
-    status_flags["deriv_connected"] = True
+
+def _deriv_on_open(ws):
+    global _deriv_connected
+    _deriv_connected = True
     print("[DERIV] Connected.")
-    # solicita lista de ativos
-    ws.send(json.dumps({"active_symbols": "brief", "product_type": "basic"}))
+    # Subscribe each symbol to ticks
+    subscribed = 0
+    for s in DERIV_SYMBOLS:
+        msg = {"ticks": s, "subscribe": 1}
+        try:
+            ws.send(json.dumps(msg))
+            subscribed += 1
+        except Exception as e:
+            print(f"[DERIV] subscribe({s}) error: {e}")
+    print(f"[DERIV] Subscribed to {subscribed} symbols.")
 
-def deriv_on_error(ws, error):
-    print(f"[DERIV Error] {error}")
 
-def deriv_on_close(ws, code, reason):
-    status_flags["deriv_connected"] = False
-    print(f"[DERIV] Closed ({code}). Reconnecting in 5s...")
+def _deriv_on_error(ws, error):
+    print(f"[DERIV] Error: {error}")
+
+
+def _deriv_on_close(ws, code, reason):
+    global _deriv_connected
+    _deriv_connected = False
+    print(f"[DERIV] Closed ({code}): {reason}. Reconnecting in 5s...")
     time.sleep(5)
-    start_deriv_ws()
+    start_deriv_thread()  # auto-reconnect
 
-def start_deriv_ws():
+
+def start_deriv_thread():
+    global _deriv_ws
+    if _deriv_ws is not None:
+        try:
+            _deriv_ws.close()
+        except Exception:
+            pass
+    _deriv_ws = WebSocketApp(
+        DERIV_WS_URL,
+        on_open=_deriv_on_open,
+        on_message=_deriv_on_message,
+        on_error=_deriv_on_error,
+        on_close=_deriv_on_close,
+    )
+    t = threading.Thread(target=_deriv_ws.run_forever, kwargs={"ping_interval": 20}, daemon=True)
+    t.start()
+
+
+# -----------------------------
+# Sessões autenticadas (Quotex / IQ)
+# -----------------------------
+class LoginPayload(BaseModel):
+    user_id: str = Field(..., description="ID único do seu cliente (ex: email, UUID etc.)")
+    email: str = Field(..., description="Email do cliente na corretora")
+    password: str = Field(..., description="Senha do cliente na corretora")
+
+
+class DisconnectPayload(BaseModel):
+    user_id: str
+    platform: str  # "quotex" ou "iq"
+
+
+# Guardamos apenas estado serializável separadamente;
+# objetos de conexão ficam em mapas internos (não retornados via API).
+sessions_state: Dict[str, Dict[str, Dict[str, Any]]] = {
+    "quotex": {},  # user_id -> {connected: bool, last_error: str|None, since: ts}
+    "iq": {},      # idem
+}
+# Armazena objetos vivos (não serializar)
+_quotex_clients: Dict[str, Any] = {}
+_iq_clients: Dict[str, Any] = {}
+
+_quotex_lock = threading.Lock()
+_iq_lock = threading.Lock()
+
+
+def _set_state(platform: str, user_id: str, connected: bool, last_error: Optional[str] = None):
+    sessions_state.setdefault(platform, {}).setdefault(user_id, {})
+    sessions_state[platform][user_id]["connected"] = connected
+    sessions_state[platform][user_id]["since"] = int(time.time())
+    sessions_state[platform][user_id]["last_error"] = last_error
+
+
+def _connect_quotex_thread(user_id: str, email: str, password: str):
+    """
+    Tenta conectar Quotex para este user_id em thread separada.
+    Requer pacote: quotexapi (não-oficial).
+    """
     try:
-        # app_id público de exemplo (uso em leitura). Substitua pelo seu se tiver.
-        url = "wss://ws.derivws.com/websockets/v3?app_id=1089"
-        ws = websocket.WebSocketApp(
-            url,
-            on_open=deriv_on_open,
-            on_message=deriv_on_message,
-            on_error=deriv_on_error,
-            on_close=deriv_on_close
-        )
-        ws.run_forever(reconnect=5)
+        from quotexapi.stable_api import Quotex  # pip install quotexapi
     except Exception as e:
-        print(f"[DERIV start] {e}")
+        _set_state("quotex", user_id, False, f"Pacote quotexapi indisponível: {e}")
+        return
 
-# ====== ADAPTERS STUBS (DESLIGADOS POR PADRÃO) ======
-def start_quotex_ws_stub():
-    # Stub seguro: não usa endpoints privados
-    status_flags["quotex_connected"] = False
-    print("[QUOTEX] Stub público desativado (sem API pública).")
+    try:
+        # Fecha sessão anterior deste user, se houver
+        with _quotex_lock:
+            old = _quotex_clients.pop(user_id, None)
+            if old:
+                try:
+                    old.close()
+                except Exception:
+                    pass
 
-def start_iq_ws_stub():
-    status_flags["iq_connected"] = False
-    print("[IQOPTION] Stub público desativado (sem API pública).")
+        client = Quotex(email, password)
+        ok = client.connect()
+        if not ok:
+            _set_state("quotex", user_id, False, "Falha de autenticação ou bloqueio regional")
+            return
 
-# ====== STARTUP ======
-@app.on_event("startup")
-async def startup_event():
-    print("🚀 Iniciando feeds...")
-    if ENABLE_DERIV:
-        threading.Thread(target=start_deriv_ws, daemon=True).start()
-    if ENABLE_QUOTEX:
-        threading.Thread(target=start_quotex_ws_stub, daemon=True).start()
-    if ENABLE_IQ:
-        threading.Thread(target=start_iq_ws_stub, daemon=True).start()
+        # Se conectou, guarda referência
+        with _quotex_lock:
+            _quotex_clients[user_id] = client
+        _set_state("quotex", user_id, True, None)
 
-# ====== ROTAS HTTP ======
+        # (Opcional) Assinaturas de preços/velas específicas por usuário
+        # Ex.: client.subscribe_realtime("EURUSD", period=60)
+        # Mantém a thread viva checando conexão
+        while True:
+            time.sleep(20)
+            # Aqui você pode checar um ping, saldo, etc.
+            # Se cair, marque desconectado e break
+            # (muitos wrappers não expõem 'is_connected'; trate exceções)
+    except Exception as e:
+        _set_state("quotex", user_id, False, str(e))
+
+
+def _connect_iq_thread(user_id: str, email: str, password: str):
+    """
+    Tenta conectar IQ Option para este user_id em thread separada.
+    Requer pacote: iqoptionapi (não-oficial).
+    """
+    try:
+        from iqoptionapi.stable_api import IQ_Option  # pip install iqoptionapi
+    except Exception as e:
+        _set_state("iq", user_id, False, f"Pacote iqoptionapi indisponível: {e}")
+        return
+
+    try:
+        with _iq_lock:
+            old = _iq_clients.pop(user_id, None)
+            if old:
+                try:
+                    old.close()
+                except Exception:
+                    pass
+
+        Iq = IQ_Option(email, password)
+        connected, reason = Iq.connect()
+        if not connected:
+            _set_state("iq", user_id, False, f"Falha de autenticação: {reason}")
+            return
+
+        with _iq_lock:
+            _iq_clients[user_id] = Iq
+        _set_state("iq", user_id, True, None)
+
+        # Você pode ativar assinaturas de velas:
+        # Iq.start_candles_stream("EURUSD", 60, 100)
+        while True:
+            time.sleep(20)
+            # Opcional: verificar algo do socket; se falhar, marcar como desconectado
+    except Exception as e:
+        _set_state("iq", user_id, False, str(e))
+
+
+def _disconnect_user(platform: str, user_id: str):
+    if platform == "quotex":
+        with _quotex_lock:
+            client = _quotex_clients.pop(user_id, None)
+            if client:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+        _set_state("quotex", user_id, False, None)
+        return True
+
+    if platform == "iq":
+        with _iq_lock:
+            client = _iq_clients.pop(user_id, None)
+            if client:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+        _set_state("iq", user_id, False, None)
+        return True
+
+    return False
+
+
+# -----------------------------
+# Endpoints públicos
+# -----------------------------
 @app.get("/")
 def root():
     return {
-        "app": APP_TITLE,
-        "auto_mode": AUTO_MODE,
-        "feeds": status_flags,
-        "symbols_tracked": list(candles.keys())
+        "app": "ImperadorVIP - Global Signal Engine (Public + Auth)",
+        "auto_mode": False,
+        "feeds": {
+            "deriv_connected": _deriv_connected,
+            "quotex_connected": any(v.get("connected") for v in sessions_state.get("quotex", {}).values()),
+            "iq_connected": any(v.get("connected") for v in sessions_state.get("iq", {}).values()),
+        },
+        "symbols_tracked": list(deriv_prices.keys())[:200],
     }
+
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "ts": int(time.time())}
 
-@app.get("/status")
-def status():
-    return {
-        "feeds": status_flags,
-        "prices_count": len(latest_prices),
-        "signals_count": len(signals_feed)
-    }
 
-@app.post("/mode/{state}")
-def set_mode(state: str):
-    global AUTO_MODE
-    AUTO_MODE = (state.lower() == "auto")
-    return {"mode": "auto" if AUTO_MODE else "manual"}
+@app.get("/feeds/deriv/price/{symbol}")
+def deriv_price(symbol: str):
+    sym = symbol.upper()
+    d = deriv_prices.get(sym)
+    if not d:
+        return {"error": f"no recent price for {sym}"}
+    return {"symbol": sym, "price": d["price"], "ts": d["ts"]}
 
-@app.get("/price/{symbol}")
-def get_price(symbol: str):
-    if symbol in latest_prices:
-        return {"symbol": symbol, "price": latest_prices[symbol], "ts": last_update_ts.get(symbol)}
-    return {"error": "symbol not tracked"}
 
-@app.get("/candles/{symbol}")
-def get_candles(symbol: str):
-    if symbol in candles:
-        return {"symbol": symbol, "candles": candles[symbol][-100:]}
-    return {"error": "symbol not tracked"}
+@app.get("/sessions")
+def sessions():
+    # NÃO expõe objetos de conexão; apenas estado serializável
+    return sessions_state
 
-@app.get("/signals")
-def list_signals():
-    return {"signals": signals_feed[-50:]}
 
-class ManualSignal(BaseModel):
-    symbol: str
-    direction: str
-    note: Optional[str] = None
+@app.post("/connect/quotex")
+def connect_quotex(body: LoginPayload, tasks: BackgroundTasks):
+    """
+    Dispara conexão Quotex para este user_id (multiusuário).
+    NÃO armazena senha; usa apenas para abrir a sessão.
+    """
+    _set_state("quotex", body.user_id, False, "connecting")
+    tasks.add_task(_connect_quotex_thread, body.user_id, body.email, body.password)
+    return {"ok": True, "platform": "quotex", "user_id": body.user_id, "message": "connecting"}
 
-@app.post("/signal/manual")
-def manual_signal(sig: ManualSignal):
-    payload = {
-        "symbol": sig.symbol,
-        "direction": sig.direction.upper(),
-        "score": 1.0,
-        "confluences": ["manual"],
-        "ts": int(now_ts()),
-        "price": float(latest_prices.get(sig.symbol, float("nan"))),
-        "note": sig.note or ""
-    }
-    signals_feed.append(payload)
-    if AUTO_MODE:
-        send_telegram(f"📡 <b>Signal MANUAL</b>\nAtivo: <b>{payload['symbol']}</b>\nDireção: <b>{payload['direction']}</b>\nPreço: {payload['price']}\nNota: {payload['note']}")
-        post_base44(payload)
-    return {"ok": True, "signal": payload}
 
-# Execução local (Railway usa uvicorn externo)
+@app.post("/connect/iq")
+def connect_iq(body: LoginPayload, tasks: BackgroundTasks):
+    """
+    Dispara conexão IQ Option para este user_id (multiusuário).
+    """
+    _set_state("iq", body.user_id, False, "connecting")
+    tasks.add_task(_connect_iq_thread, body.user_id, body.email, body.password)
+    return {"ok": True, "platform": "iq", "user_id": body.user_id, "message": "connecting"}
+
+
+@app.post("/disconnect")
+def disconnect(body: DisconnectPayload):
+    ok = _disconnect_user(body.platform.lower(), body.user_id)
+    return {"ok": ok, "platform": body.platform.lower(), "user_id": body.user_id}
+
+
+# -----------------------------
+# Startup
+# -----------------------------
+@app.on_event("startup")
+def _startup():
+    print("🚀 Iniciando feeds...")
+    start_deriv_thread()
+
+
+# -----------------------------
+# Exec local (Railway usa PORT)
+# -----------------------------
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.getenv("PORT", "8080"))
+    uvicorn.run(app, host="0.0.0.0", port=port)
