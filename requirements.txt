@@ -1,6 +1,6 @@
 fastapi
 uvicorn
 requests
-websockets
 websocket-client
-rel
+pandas
+numpy
