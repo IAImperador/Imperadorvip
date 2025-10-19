@@ -17,6 +17,3 @@ pydantic==2.9.2
 
 # Tarefas assíncronas e agendamentos
 apscheduler==3.10.4
-
-# Fix asyncpg build (Linux/containers)
-Cython==3.0.11
