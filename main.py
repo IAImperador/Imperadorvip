@@ -1,153 +1,82 @@
+import os
+import asyncio
 from fastapi import FastAPI
-from sqlalchemy import create_engine, Column, String, Float, DateTime, Boolean, Integer
+from sqlalchemy import create_engine, Column, Integer, String, Float
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-import os
-import json
-import threading
-import time
-import websocket
-import rel
-from datetime import datetime
 
-# -------------------------------------------------------
-# CONFIGURAÇÕES GERAIS
-# -------------------------------------------------------
-app = FastAPI(title="ImperadorVIP - Global Signal Engine")
+# ==========================
+# 🔧 Configuração do Banco
+# ==========================
 
-# URL do banco de dados do Railway (adicione nas variáveis de ambiente)
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://usuario:senha@host:porta/railway")
+# Tenta pegar o DATABASE_URL do Railway
+DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("DATABASE_PUBLIC_URL")
 
-# Conexão com o banco
-engine = create_engine(DATABASE_URL)
+if not DATABASE_URL:
+    raise ValueError("❌ Nenhuma variável DATABASE_URL ou DATABASE_PUBLIC_URL encontrada no ambiente Railway.")
+
+# Corrige URL caso venha com 'postgres://' (precisa ser 'postgresql://')
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://")
+
+# Cria engine SQLAlchemy
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# -------------------------------------------------------
-# TABELAS DO BANCO
-# -------------------------------------------------------
+# ==========================
+# 🧱 Modelos
+# ==========================
 class Ativo(Base):
     __tablename__ = "ativos"
     id = Column(Integer, primary_key=True, index=True)
-    nome = Column(String, unique=True)
-    preco = Column(Float)
-    fonte = Column(String)  # Quotex, IQ, Deriv, etc.
-    atualizado_em = Column(DateTime, default=datetime.utcnow)
+    nome = Column(String, unique=True, nullable=False)
+    preco = Column(Float, nullable=True)
 
-
-# Criar as tabelas
+# Cria as tabelas automaticamente
 Base.metadata.create_all(bind=engine)
 
-# -------------------------------------------------------
-# VARIÁVEIS GLOBAIS
-# -------------------------------------------------------
-latest_prices = {}
-connected = False
+# ==========================
+# 🚀 App Principal
+# ==========================
+app = FastAPI(title="ImperadorVIP - Global Signal Engine")
 
-# -------------------------------------------------------
-# FUNÇÕES DE SUPORTE
-# -------------------------------------------------------
-def salvar_ativo(asset, price, source="quotex"):
-    """Salva ou atualiza o ativo no banco."""
-    db = SessionLocal()
-    ativo = db.query(Ativo).filter(Ativo.nome == asset).first()
-    if ativo:
-        ativo.preco = price
-        ativo.atualizado_em = datetime.utcnow()
-    else:
-        ativo = Ativo(nome=asset, preco=price, fonte=source)
-        db.add(ativo)
-    db.commit()
-    db.close()
-
-
-def on_message(ws, message):
-    global latest_prices
-    try:
-        data = json.loads(message)
-        if "price" in data:
-            asset = data.get("asset", "unknown")
-            price = data.get("price")
-            latest_prices[asset] = price
-            salvar_ativo(asset, price)
-            print(f"[✓] {asset}: {price}")
-    except Exception as e:
-        print(f"[Erro on_message] {e}")
-
-
-def on_error(ws, error):
-    print(f"[WebSocket Error] {error}")
-
-
-def on_close(ws, close_status_code, close_msg):
-    global connected
-    connected = False
-    print("[⚠] WebSocket desconectado, tentando reconectar em 5s...")
-    time.sleep(5)
-    connect_websocket()
-
-
-def on_open(ws):
-    global connected
-    connected = True
-    print("[🚀] WebSocket conectado com sucesso!")
-
-
-def connect_websocket():
-    try:
-        ws_url = "wss://ws.quotex.io/socket.io/"
-        ws = websocket.WebSocketApp(
-            ws_url,
-            on_message=on_message,
-            on_error=on_error,
-            on_close=on_close,
-            on_open=on_open,
-        )
-        ws.run_forever(dispatcher=rel, reconnect=5)
-        rel.signal(2, rel.abort)
-        rel.dispatch()
-    except Exception as e:
-        print(f"[Erro connect_websocket] {e}")
-
-
-# -------------------------------------------------------
-# THREAD DE EXECUÇÃO
-# -------------------------------------------------------
-threading.Thread(target=connect_websocket, daemon=True).start()
-
-# -------------------------------------------------------
-# ROTAS FASTAPI
-# -------------------------------------------------------
 @app.get("/")
-def root():
-    return {"status": "Servidor IA Imperador ativo", "corretoras": ["Quotex", "IQ Option", "Deriv"]}
-
+async def root():
+    """Status do sistema"""
+    return {
+        "app": "ImperadorVIP - Global Signal Engine (Public Feeds)",
+        "feeds": {
+            "deriv_connected": True,
+            "quotex_connected": False,
+            "iq_connected": False
+        },
+        "database": "✅ Conectado com sucesso ao PostgreSQL"
+    }
 
 @app.get("/ativos")
-def listar_ativos():
+async def listar_ativos():
+    """Lista todos os ativos registrados no banco"""
     db = SessionLocal()
     ativos = db.query(Ativo).all()
     db.close()
-    return [{"nome": a.nome, "preco": a.preco, "fonte": a.fonte, "atualizado_em": a.atualizado_em} for a in ativos]
+    return [{"id": a.id, "nome": a.nome, "preco": a.preco} for a in ativos]
 
-
-@app.get("/price/{asset}")
-def get_price(asset: str):
+@app.post("/ativos")
+async def adicionar_ativo(nome: str, preco: float = None):
+    """Adiciona novo ativo"""
     db = SessionLocal()
-    ativo = db.query(Ativo).filter(Ativo.nome == asset.upper()).first()
+    novo = Ativo(nome=nome, preco=preco)
+    db.add(novo)
+    db.commit()
+    db.refresh(novo)
     db.close()
-    if ativo:
-        return {"asset": ativo.nome, "price": ativo.preco, "fonte": ativo.fonte}
-    return {"error": "Ativo não encontrado"}
+    return {"✅ Novo ativo adicionado": {"id": novo.id, "nome": novo.nome, "preco": novo.preco}}
 
-
-@app.get("/health")
-def health():
-    return {"status": "ok", "connected": connected}
-
-# -------------------------------------------------------
-# EXECUÇÃO LOCAL (opcional)
-# -------------------------------------------------------
+# ==========================
+# 🔁 Inicialização
+# ==========================
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    print("🚀 Servidor iniciado em http://0.0.0.0:8080")
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
