@@ -1,6 +1,18 @@
+# Servidor web
 fastapi==0.115.0
-uvicorn==0.30.6
-websocket-client==1.8.0
-rel==0.4.9
-sqlalchemy==2.0.34
-psycopg[binary]
+uvicorn[standard]==0.30.1
+
+# Banco de dados e ORM
+sqlalchemy==2.0.36
+psycopg2-binary==2.9.9
+
+# Requisições e WebSockets (para corretoras)
+httpx==0.27.0
+websockets==12.0
+
+# Utilidades
+python-dotenv==1.0.1
+pydantic==2.9.2
+
+# Tarefas assíncronas e agendamentos
+apscheduler==3.10.4
