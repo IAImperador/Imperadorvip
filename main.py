@@ -5,7 +5,9 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
 from dotenv import load_dotenv
 
-# Carrega variáveis de ambiente (.env)
+# ============================================================
+# 🔹 Carregar variáveis de ambiente (.env)
+# ============================================================
 load_dotenv()
 
 # ============================================================
@@ -16,16 +18,25 @@ DATABASE_URL = os.getenv(
     "postgresql+asyncpg://postgres:PuypxUfIHIxWXuTuIEIAGoGIFdYeUgpt@mainline.proxy.rlwy.net:16060/railway"
 )
 
+# Criar engine assíncrona
 engine = create_async_engine(DATABASE_URL, echo=True, future=True)
+
+# Criar fábrica de sessões assíncronas
 AsyncSessionLocal = sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+
+# Base para os modelos ORM
 Base = declarative_base()
 
 # ============================================================
 # 🔹 Inicialização do FastAPI
 # ============================================================
-app = FastAPI(title="ImperadorVIP API", version="1.0")
+app = FastAPI(
+    title="ImperadorVIP API",
+    version="1.0",
+    description="🚀 API para integração do sistema ImperadorVIP em tempo real."
+)
 
-# Permitir CORS (para conexão com apps e sites externos)
+# Configurar CORS para permitir requisições de apps externos
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -52,7 +63,7 @@ async def health_check():
     return {"ok": True, "db": str(engine.url)}
 
 # ============================================================
-# 🔹 Inicialização automática (eventos)
+# 🔹 Eventos de inicialização e encerramento
 # ============================================================
 @app.on_event("startup")
 async def startup_event():
@@ -68,3 +79,4 @@ async def shutdown_event():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=True)
+
