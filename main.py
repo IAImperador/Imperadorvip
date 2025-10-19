@@ -19,11 +19,15 @@ logger = logging.getLogger("ImperadorVIP")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not DATABASE_URL:
-    raise Exception("DATABASE_URL não foi encontrado nas variáveis de ambiente!")
+    raise Exception("❌ Erro: DATABASE_URL não encontrada. Adicione nas variáveis do Railway!")
 
-engine = create_engine(DATABASE_URL, echo=False)
-SessionLocal = sessionmaker(bind=engine)
-Base = declarative_base()
+try:
+    engine = create_engine(DATABASE_URL, echo=False)
+    SessionLocal = sessionmaker(bind=engine)
+    Base = declarative_base()
+    logger.info("✅ Banco de dados conectado com sucesso.")
+except Exception as e:
+    logger.error(f"❌ Falha ao conectar ao banco de dados: {e}")
 
 # --------------------------------------------------------------------
 # MODELOS
@@ -39,7 +43,7 @@ class Signal(Base):
 Base.metadata.create_all(bind=engine)
 
 # --------------------------------------------------------------------
-# FASTAPI
+# APLICAÇÃO FASTAPI
 app = FastAPI(title="ImperadorVIP - Global Signal Engine")
 
 @app.get("/")
@@ -61,7 +65,7 @@ async def root():
     }
 
 # --------------------------------------------------------------------
-# SIMULAÇÃO DE FEEDS (DERIV, QUOTEX, IQ)
+# SIMULAÇÃO DE FEEDS (DERIV)
 async def connect_deriv():
     logger.info("[DERIV] Connected.")
     await asyncio.sleep(2)
@@ -77,4 +81,3 @@ if __name__ == "__main__":
     import uvicorn
     asyncio.run(main())
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
-
