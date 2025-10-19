@@ -1,315 +1,433 @@
 import os
-import json
 import time
-import threading
-from typing import Dict, Any, Optional
-from fastapi import FastAPI, BackgroundTasks
+from datetime import datetime
+from enum import StrEnum
+from typing import List, Optional, Literal, Dict, Any
+
+import numpy as np
+import pandas as pd
+import httpx
+from dotenv import load_dotenv
+from fastapi import FastAPI, Depends, HTTPException, Header, Request, Query, Body
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.middleware import SlowAPIMiddleware
+from sqlalchemy import (
+    create_engine, String, Integer, Float, BigInteger, DateTime,
+    UniqueConstraint, Index, text
+)
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, Session
+from ta.momentum import RSIIndicator
+from ta.trend import SMAIndicator
 
-# -----------------------------
-# App
-# -----------------------------
-app = FastAPI(title="ImperadorVIP - Global Signal Engine (Public + Auth)")
+# -----------------------------------------------------------------------------
+# Carregar env
+# -----------------------------------------------------------------------------
+load_dotenv()
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+API_KEY_ENV = os.getenv("API_KEY", "")
+ASSET_SYNC_MODE = os.getenv("ASSET_SYNC_MODE", "static").lower()
 
-# -----------------------------
-# Feeds públicos (Deriv)
-# -----------------------------
-from websocket import WebSocketApp  # pacote: websocket-client
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL não definido.")
+if not API_KEY_ENV:
+    raise RuntimeError("API_KEY não definido.")
 
-DERIV_WS_URL = "wss://ws.binaryws.com/websockets/v3?app_id=1089"
-DERIV_SYMBOLS = [
-    # Synthetics + Crypto que você já estava usando
-    "CRASH900", "BOOM1000", "CRASH1000", "BOOM600", "BOOM300N",
-    "CRASH600", "RDBULL", "cryETHUSD", "CRASH500", "BOOM900",
-    "cryBTCUSD", "CRASH300N", "RDBEAR", "BOOM500"
-]
+# -----------------------------------------------------------------------------
+# Segurança simples com API Key
+# -----------------------------------------------------------------------------
+def require_api_key(x_api_key: str = Header(default="")):
+    if x_api_key != API_KEY_ENV:
+        raise HTTPException(status_code=401, detail="API Key inválida.")
+    return True
 
-deriv_prices: Dict[str, Dict[str, Any]] = {}
-_deriv_ws: Optional[WebSocketApp] = None
-_deriv_connected = False
+# -----------------------------------------------------------------------------
+# Rate Limit
+# -----------------------------------------------------------------------------
+limiter = Limiter(key_func=get_remote_address)
+app = FastAPI(title="ImperadorVIP - Asset & AI Analysis API")
+app.state.limiter = limiter
+app.add_exception_handler(429, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
 
+# CORS (abra para seu front/app)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # troque para seu domínio quando tiver
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-def _deriv_on_message(ws, message: str):
-    try:
-        data = json.loads(message)
-        # tick stream response example: {"tick":{"symbol":"R_100","quote":123.45,"epoch":...}, "subscription": {...}}
-        if "tick" in data and isinstance(data["tick"], dict):
-            sym = data["tick"].get("symbol")
-            quote = data["tick"].get("quote")
-            epoch = data["tick"].get("epoch")
-            if sym and quote is not None:
-                deriv_prices[sym] = {"price": quote, "ts": epoch}
-    except Exception as e:
-        print(f"[DERIV on_message] {e}")
+# -----------------------------------------------------------------------------
+# Banco (SQLAlchemy)
+# -----------------------------------------------------------------------------
+class Base(DeclarativeBase):
+    pass
 
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
-def _deriv_on_open(ws):
-    global _deriv_connected
-    _deriv_connected = True
-    print("[DERIV] Connected.")
-    # Subscribe each symbol to ticks
-    subscribed = 0
-    for s in DERIV_SYMBOLS:
-        msg = {"ticks": s, "subscribe": 1}
-        try:
-            ws.send(json.dumps(msg))
-            subscribed += 1
-        except Exception as e:
-            print(f"[DERIV] subscribe({s}) error: {e}")
-    print(f"[DERIV] Subscribed to {subscribed} symbols.")
+class Platform(StrEnum):
+    deriv = "deriv"
+    quotex = "quotex"
+    iq = "iq"
 
+class Asset(Base):
+    __tablename__ = "assets"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    platform: Mapped[str] = mapped_column(String(20), index=True)
+    symbol: Mapped[str] = mapped_column(String(64), index=True)
+    name: Mapped[Optional[str]] = mapped_column(String(128), default=None)
+    is_active: Mapped[int] = mapped_column(Integer, default=1)  # 1 true / 0 false
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
-def _deriv_on_error(ws, error):
-    print(f"[DERIV] Error: {error}")
-
-
-def _deriv_on_close(ws, code, reason):
-    global _deriv_connected
-    _deriv_connected = False
-    print(f"[DERIV] Closed ({code}): {reason}. Reconnecting in 5s...")
-    time.sleep(5)
-    start_deriv_thread()  # auto-reconnect
-
-
-def start_deriv_thread():
-    global _deriv_ws
-    if _deriv_ws is not None:
-        try:
-            _deriv_ws.close()
-        except Exception:
-            pass
-    _deriv_ws = WebSocketApp(
-        DERIV_WS_URL,
-        on_open=_deriv_on_open,
-        on_message=_deriv_on_message,
-        on_error=_deriv_on_error,
-        on_close=_deriv_on_close,
+    __table_args__ = (
+        UniqueConstraint("platform", "symbol", name="uq_platform_symbol"),
+        Index("idx_assets_platform_symbol", "platform", "symbol"),
     )
-    t = threading.Thread(target=_deriv_ws.run_forever, kwargs={"ping_interval": 20}, daemon=True)
-    t.start()
 
+class Candle(Base):
+    __tablename__ = "candles"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    platform: Mapped[str] = mapped_column(String(20), index=True)
+    symbol: Mapped[str] = mapped_column(String(64), index=True)
+    ts: Mapped[datetime] = mapped_column(DateTime, index=True)
+    open: Mapped[float] = mapped_column(Float)
+    high: Mapped[float] = mapped_column(Float)
+    low: Mapped[float] = mapped_column(Float)
+    close: Mapped[float] = mapped_column(Float)
+    volume: Mapped[float] = mapped_column(Float, default=0.0)
 
-# -----------------------------
-# Sessões autenticadas (Quotex / IQ)
-# -----------------------------
-class LoginPayload(BaseModel):
-    user_id: str = Field(..., description="ID único do seu cliente (ex: email, UUID etc.)")
-    email: str = Field(..., description="Email do cliente na corretora")
-    password: str = Field(..., description="Senha do cliente na corretora")
+    __table_args__ = (
+        UniqueConstraint("platform", "symbol", "ts", name="uq_candle_unique"),
+        Index("idx_candles_plat_sym_ts", "platform", "symbol", "ts"),
+    )
 
+class Signal(Base):
+    __tablename__ = "signals"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    platform: Mapped[str] = mapped_column(String(20), index=True)
+    symbol: Mapped[str] = mapped_column(String(64), index=True)
+    ts: Mapped[datetime] = mapped_column(DateTime, index=True)
+    rsi: Mapped[Optional[float]] = mapped_column(Float, default=None)
+    sma_fast: Mapped[Optional[float]] = mapped_column(Float, default=None)
+    sma_slow: Mapped[Optional[float]] = mapped_column(Float, default=None)
+    trend: Mapped[Optional[str]] = mapped_column(String(16), default=None)
+    confluence: Mapped[Optional[str]] = mapped_column(String(16), default=None)  # buy/sell/neutral
 
-class DisconnectPayload(BaseModel):
-    user_id: str
-    platform: str  # "quotex" ou "iq"
+    __table_args__ = (
+        Index("idx_signals_plat_sym_ts", "platform", "symbol", "ts"),
+    )
 
+Base.metadata.create_all(engine)
 
-# Guardamos apenas estado serializável separadamente;
-# objetos de conexão ficam em mapas internos (não retornados via API).
-sessions_state: Dict[str, Dict[str, Dict[str, Any]]] = {
-    "quotex": {},  # user_id -> {connected: bool, last_error: str|None, since: ts}
-    "iq": {},      # idem
+# -----------------------------------------------------------------------------
+# Modelos (Pydantic)
+# -----------------------------------------------------------------------------
+class AssetOut(BaseModel):
+    platform: Platform
+    symbol: str
+    name: Optional[str] = None
+    is_active: bool = True
+
+class SyncAssetsIn(BaseModel):
+    platforms: Optional[List[Platform]] = Field(default=None, description="Se vazio: sincroniza todas")
+
+class CandleIn(BaseModel):
+    platform: Platform
+    symbol: str
+    ts: datetime
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float = 0.0
+
+class AnalysisOut(BaseModel):
+    platform: Platform
+    symbol: str
+    lookback: int
+    last_ts: Optional[datetime]
+    indicators: Dict[str, Any]
+    signal: Optional[str]
+
+# -----------------------------------------------------------------------------
+# Seeds estáticos de ATIVOS (ponto de partida)
+# -----------------------------------------------------------------------------
+STATIC_ASSETS = {
+    "deriv": [
+        # Synthetic + crypto/forex (exemplos; adicione o que quiser)
+        "BOOM1000","CRASH1000","BOOM500","CRASH500","BOOM300","CRASH300",
+        "BOOM600","CRASH600","BOOM900","CRASH900",
+        "cryBTCUSD","cryETHUSD","EURUSD","GBPUSD","USDJPY"
+    ],
+    "quotex": [
+        "EURUSD","GBPUSD","USDJPY","AUDCAD","BTCUSD","ETHUSD"
+    ],
+    "iq": [
+        "EURUSD","GBPUSD","USDJPY","AUDCAD","AUDUSD","BTCUSD","ETHUSD"
+    ],
 }
-# Armazena objetos vivos (não serializar)
-_quotex_clients: Dict[str, Any] = {}
-_iq_clients: Dict[str, Any] = {}
 
-_quotex_lock = threading.Lock()
-_iq_lock = threading.Lock()
+# -----------------------------------------------------------------------------
+# Funções de sincronização de ATIVOS
+# (no modo 'static' usa seeds; depois podemos implementar 'live')
+# -----------------------------------------------------------------------------
+async def fetch_assets_deriv_live() -> List[str]:
+    # TODO: implementar via API oficial da Deriv (active_symbols)
+    # Por ora, retorna seed até conectarmos live.
+    return STATIC_ASSETS["deriv"]
 
+async def fetch_assets_quotex_live() -> List[str]:
+    # TODO: implementar quando API pública estável estiver definida
+    return STATIC_ASSETS["quotex"]
 
-def _set_state(platform: str, user_id: str, connected: bool, last_error: Optional[str] = None):
-    sessions_state.setdefault(platform, {}).setdefault(user_id, {})
-    sessions_state[platform][user_id]["connected"] = connected
-    sessions_state[platform][user_id]["since"] = int(time.time())
-    sessions_state[platform][user_id]["last_error"] = last_error
+async def fetch_assets_iq_live() -> List[str]:
+    # TODO: IQ tem SDKs não-oficiais; manter seed por enquanto
+    return STATIC_ASSETS["iq"]
 
+async def get_assets_for_platform(platform: Platform) -> List[str]:
+    if ASSET_SYNC_MODE == "live":
+        if platform == Platform.deriv:
+            return await fetch_assets_deriv_live()
+        if platform == Platform.quotex:
+            return await fetch_assets_quotex_live()
+        if platform == Platform.iq:
+            return await fetch_assets_iq_live()
+    # default: static
+    return STATIC_ASSETS[platform.value]
 
-def _connect_quotex_thread(user_id: str, email: str, password: str):
+def upsert_assets(db: Session, platform: Platform, symbols: List[str]) -> int:
+    inserted = 0
+    for sym in symbols:
+        # UPSERT simples
+        exists = db.execute(
+            text("SELECT id FROM assets WHERE platform=:p AND symbol=:s"),
+            {"p": platform.value, "s": sym}
+        ).first()
+        if exists is None:
+            db.execute(
+                text("""INSERT INTO assets (platform, symbol, name, is_active, created_at)
+                        VALUES (:p, :s, :n, :ia, :ca)"""),
+                {"p": platform.value, "s": sym, "n": sym, "ia": 1, "ca": datetime.utcnow()}
+            )
+            inserted += 1
+    db.commit()
+    return inserted
+
+# -----------------------------------------------------------------------------
+# Ingestão de CANDLES (seu feed publica aqui)
+# -----------------------------------------------------------------------------
+@app.post("/ingest/candle")
+@limiter.limit("120/minute")
+def ingest_candle(payload: CandleIn, ok: bool = Depends(require_api_key)):
+    with Session(engine) as db:
+        # UPSERT por (platform,symbol,ts)
+        db.execute(
+            text("""INSERT INTO candles (platform, symbol, ts, open, high, low, close, volume)
+                    VALUES (:p,:s,:ts,:o,:h,:l,:c,:v)
+                    ON CONFLICT (platform, symbol, ts) DO UPDATE
+                    SET open=EXCLUDED.open, high=EXCLUDED.high, low=EXCLUDED.low,
+                        close=EXCLUDED.close, volume=EXCLUDED.volume
+            """),
+            {"p":payload.platform.value,"s":payload.symbol,"ts":payload.ts,
+             "o":payload.open,"h":payload.high,"l":payload.low,"c":payload.close,"v":payload.volume}
+        )
+        db.commit()
+    return {"status":"ok"}
+
+# Ingestão em lote
+@app.post("/ingest/candles")
+@limiter.limit("60/minute")
+def ingest_candles(
+    items: List[CandleIn],
+    ok: bool = Depends(require_api_key)
+):
+    with Session(engine) as db:
+        for c in items:
+            db.execute(
+                text("""INSERT INTO candles (platform, symbol, ts, open, high, low, close, volume)
+                        VALUES (:p,:s,:ts,:o,:h,:l,:c,:v)
+                        ON CONFLICT (platform, symbol, ts) DO UPDATE
+                        SET open=EXCLUDED.open, high=EXCLUDED.high, low=EXCLUDED.low,
+                            close=EXCLUDED.close, volume=EXCLUDED.volume
+                """),
+                {"p":c.platform.value,"s":c.symbol,"ts":c.ts,
+                 "o":c.open,"h":c.high,"l":c.low,"c":c.close,"v":c.volume}
+            )
+        db.commit()
+    return {"status":"ok","count":len(items)}
+
+# -----------------------------------------------------------------------------
+# Sincronização de ATIVOS
+# -----------------------------------------------------------------------------
+@app.post("/assets/sync")
+@limiter.limit("20/minute")
+async def sync_assets(body: SyncAssetsIn = Body(default=SyncAssetsIn()), ok: bool = Depends(require_api_key)):
+    platforms = body.platforms or [Platform.deriv, Platform.quotex, Platform.iq]
+    summary = {}
+    with Session(engine) as db:
+        for p in platforms:
+            symbols = await get_assets_for_platform(p)
+            inserted = upsert_assets(db, p, symbols)
+            summary[p.value] = {"found": len(symbols), "inserted": inserted}
+    return {"mode": ASSET_SYNC_MODE, "summary": summary}
+
+# Listagem de ATIVOS (com filtros)
+@app.get("/assets", response_model=List[AssetOut])
+@limiter.limit("60/minute")
+def list_assets(
+    platform: Optional[Platform] = Query(default=None),
+    search: Optional[str] = Query(default=None),
+):
+    q = "SELECT platform, symbol, name, is_active FROM assets"
+    conds = []
+    params = {}
+    if platform:
+        conds.append("platform=:p")
+        params["p"] = platform.value
+    if search:
+        conds.append("(symbol ILIKE :q OR name ILIKE :q)")
+        params["q"] = f"%{search}%"
+    if conds:
+        q += " WHERE " + " AND ".join(conds)
+    q += " ORDER BY platform, symbol LIMIT 2000"
+    with Session(engine) as db:
+        rows = db.execute(text(q), params).all()
+    return [
+        AssetOut(
+            platform=row[0], symbol=row[1], name=row[2],
+            is_active=bool(row[3])
+        ) for row in rows
+    ]
+
+# -----------------------------------------------------------------------------
+# Análise de GRÁFICO com IA (indicadores + confluência)
+# -----------------------------------------------------------------------------
+def make_analysis(df: pd.DataFrame) -> Dict[str, Any]:
     """
-    Tenta conectar Quotex para este user_id em thread separada.
-    Requer pacote: quotexapi (não-oficial).
+    Espera df com colunas: ['ts','open','high','low','close','volume']
+    Retorna indicadores e sinal agregado.
     """
-    try:
-        from quotexapi.stable_api import Quotex  # pip install quotexapi
-    except Exception as e:
-        _set_state("quotex", user_id, False, f"Pacote quotexapi indisponível: {e}")
-        return
+    df = df.sort_values("ts").reset_index(drop=True)
 
-    try:
-        # Fecha sessão anterior deste user, se houver
-        with _quotex_lock:
-            old = _quotex_clients.pop(user_id, None)
-            if old:
-                try:
-                    old.close()
-                except Exception:
-                    pass
+    # Indicadores
+    close = df["close"]
+    rsi = RSIIndicator(close=close, window=14).rsi()
+    sma_fast = SMAIndicator(close=close, window=9).sma_indicator()
+    sma_slow = SMAIndicator(close=close, window=21).sma_indicator()
 
-        client = Quotex(email, password)
-        ok = client.connect()
-        if not ok:
-            _set_state("quotex", user_id, False, "Falha de autenticação ou bloqueio regional")
-            return
+    # Tendência simples
+    trend = "up" if sma_fast.iloc[-1] > sma_slow.iloc[-1] else "down"
 
-        # Se conectou, guarda referência
-        with _quotex_lock:
-            _quotex_clients[user_id] = client
-        _set_state("quotex", user_id, True, None)
+    # Regras de confluência (exemplo simples e conservador)
+    last_rsi = float(rsi.iloc[-1])
+    last_fast = float(sma_fast.iloc[-1])
+    last_slow = float(sma_slow.iloc[-1])
+    last_close = float(close.iloc[-1])
 
-        # (Opcional) Assinaturas de preços/velas específicas por usuário
-        # Ex.: client.subscribe_realtime("EURUSD", period=60)
-        # Mantém a thread viva checando conexão
-        while True:
-            time.sleep(20)
-            # Aqui você pode checar um ping, saldo, etc.
-            # Se cair, marque desconectado e break
-            # (muitos wrappers não expõem 'is_connected'; trate exceções)
-    except Exception as e:
-        _set_state("quotex", user_id, False, str(e))
+    signal = "neutral"
+    score = 0
 
+    # RSI zonas
+    if last_rsi < 30: score += 1
+    if last_rsi > 70: score -= 1
 
-def _connect_iq_thread(user_id: str, email: str, password: str):
-    """
-    Tenta conectar IQ Option para este user_id em thread separada.
-    Requer pacote: iqoptionapi (não-oficial).
-    """
-    try:
-        from iqoptionapi.stable_api import IQ_Option  # pip install iqoptionapi
-    except Exception as e:
-        _set_state("iq", user_id, False, f"Pacote iqoptionapi indisponível: {e}")
-        return
+    # Cruzamento e posição MAs
+    if last_fast > last_slow and last_close > last_fast: score += 1
+    if last_fast < last_slow and last_close < last_fast: score -= 1
 
-    try:
-        with _iq_lock:
-            old = _iq_clients.pop(user_id, None)
-            if old:
-                try:
-                    old.close()
-                except Exception:
-                    pass
+    # Resultado final
+    if score >= 2:
+        signal = "buy"
+    elif score <= -2:
+        signal = "sell"
+    else:
+        signal = "neutral"
 
-        Iq = IQ_Option(email, password)
-        connected, reason = Iq.connect()
-        if not connected:
-            _set_state("iq", user_id, False, f"Falha de autenticação: {reason}")
-            return
+    return {
+        "rsi": round(last_rsi, 2),
+        "sma_fast": round(last_fast, 5),
+        "sma_slow": round(last_slow, 5),
+        "trend": trend,
+        "score": score,
+        "last_close": last_close,
+    }, signal
 
-        with _iq_lock:
-            _iq_clients[user_id] = Iq
-        _set_state("iq", user_id, True, None)
+@app.get("/chart/{platform}/{symbol}", response_model=AnalysisOut)
+@limiter.limit("60/minute")
+def analyze_chart(
+    platform: Platform,
+    symbol: str,
+    lookback: int = Query(default=200, ge=30, le=2000),
+    ok: bool = Depends(require_api_key)
+):
+    with Session(engine) as db:
+        rows = db.execute(
+            text("""SELECT ts, open, high, low, close, volume
+                    FROM candles
+                    WHERE platform=:p AND symbol=:s
+                    ORDER BY ts DESC
+                    LIMIT :lb"""),
+            {"p": platform.value, "s": symbol, "lb": lookback}
+        ).all()
 
-        # Você pode ativar assinaturas de velas:
-        # Iq.start_candles_stream("EURUSD", 60, 100)
-        while True:
-            time.sleep(20)
-            # Opcional: verificar algo do socket; se falhar, marcar como desconectado
-    except Exception as e:
-        _set_state("iq", user_id, False, str(e))
+    if not rows:
+        raise HTTPException(status_code=204, detail="Sem candles para este ativo.")
 
+    df = pd.DataFrame(rows, columns=["ts","open","high","low","close","volume"])
+    indicators, final_signal = make_analysis(df)
 
-def _disconnect_user(platform: str, user_id: str):
-    if platform == "quotex":
-        with _quotex_lock:
-            client = _quotex_clients.pop(user_id, None)
-            if client:
-                try:
-                    client.close()
-                except Exception:
-                    pass
-        _set_state("quotex", user_id, False, None)
-        return True
+    # (Opcional) persistir último sinal
+    with Session(engine) as db:
+        db.add(Signal(
+            platform=platform.value, symbol=symbol,
+            ts=df["ts"].iloc[-1],
+            rsi=indicators["rsi"],
+            sma_fast=indicators["sma_fast"],
+            sma_slow=indicators["sma_slow"],
+            trend=indicators["trend"],
+            confluence=final_signal
+        ))
+        db.commit()
 
-    if platform == "iq":
-        with _iq_lock:
-            client = _iq_clients.pop(user_id, None)
-            if client:
-                try:
-                    client.close()
-                except Exception:
-                    pass
-        _set_state("iq", user_id, False, None)
-        return True
+    return AnalysisOut(
+        platform=platform,
+        symbol=symbol,
+        lookback=lookback,
+        last_ts=df["ts"].iloc[-1],
+        indicators=indicators,
+        signal=final_signal
+    )
 
-    return False
-
-
-# -----------------------------
-# Endpoints públicos
-# -----------------------------
+# -----------------------------------------------------------------------------
+# Health & raiz
+# -----------------------------------------------------------------------------
 @app.get("/")
 def root():
     return {
-        "app": "ImperadorVIP - Global Signal Engine (Public + Auth)",
-        "auto_mode": False,
-        "feeds": {
-            "deriv_connected": _deriv_connected,
-            "quotex_connected": any(v.get("connected") for v in sessions_state.get("quotex", {}).values()),
-            "iq_connected": any(v.get("connected") for v in sessions_state.get("iq", {}).values()),
-        },
-        "symbols_tracked": list(deriv_prices.keys())[:200],
+        "app": "ImperadorVIP - Assets & AI",
+        "db": "ok",
+        "asset_sync_mode": ASSET_SYNC_MODE,
+        "docs": ["/docs", "/redoc"]
     }
-
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "ts": int(time.time())}
+    # ping simples
+    with engine.connect() as c:
+        c.execute(text("SELECT 1"))
+    return {"status": "ok"}
 
-
-@app.get("/feeds/deriv/price/{symbol}")
-def deriv_price(symbol: str):
-    sym = symbol.upper()
-    d = deriv_prices.get(sym)
-    if not d:
-        return {"error": f"no recent price for {sym}"}
-    return {"symbol": sym, "price": d["price"], "ts": d["ts"]}
-
-
-@app.get("/sessions")
-def sessions():
-    # NÃO expõe objetos de conexão; apenas estado serializável
-    return sessions_state
-
-
-@app.post("/connect/quotex")
-def connect_quotex(body: LoginPayload, tasks: BackgroundTasks):
-    """
-    Dispara conexão Quotex para este user_id (multiusuário).
-    NÃO armazena senha; usa apenas para abrir a sessão.
-    """
-    _set_state("quotex", body.user_id, False, "connecting")
-    tasks.add_task(_connect_quotex_thread, body.user_id, body.email, body.password)
-    return {"ok": True, "platform": "quotex", "user_id": body.user_id, "message": "connecting"}
-
-
-@app.post("/connect/iq")
-def connect_iq(body: LoginPayload, tasks: BackgroundTasks):
-    """
-    Dispara conexão IQ Option para este user_id (multiusuário).
-    """
-    _set_state("iq", body.user_id, False, "connecting")
-    tasks.add_task(_connect_iq_thread, body.user_id, body.email, body.password)
-    return {"ok": True, "platform": "iq", "user_id": body.user_id, "message": "connecting"}
-
-
-@app.post("/disconnect")
-def disconnect(body: DisconnectPayload):
-    ok = _disconnect_user(body.platform.lower(), body.user_id)
-    return {"ok": ok, "platform": body.platform.lower(), "user_id": body.user_id}
-
-
-# -----------------------------
-# Startup
-# -----------------------------
+# -----------------------------------------------------------------------------
+# Startup: sincroniza assets (estático por padrão)
+# -----------------------------------------------------------------------------
 @app.on_event("startup")
-def _startup():
-    print("🚀 Iniciando feeds...")
-    start_deriv_thread()
-
-
-# -----------------------------
-# Exec local (Railway usa PORT)
-# -----------------------------
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.getenv("PORT", "8080"))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+async def startup():
+    # Sincroniza todas as corretoras na inicialização
+    with Session(engine) as db:
+        for p in [Platform.deriv, Platform.quotex, Platform.iq]:
+            symbols = await get_assets_for_platform(p)
+            upsert_assets(db, p, symbols)
