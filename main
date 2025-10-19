@@ -1,133 +1,110 @@
 import os
 import asyncio
-from fastapi import FastAPI
-from pydantic import BaseModel
+import json
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
-import logging
 
-# Carrega variáveis de ambiente
 load_dotenv()
 
-# Configura logs
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("ImperadorVIP")
+app = FastAPI()
 
-app = FastAPI(
-    title="ImperadorVIP API",
-    description="API unificada para múltiplas corretoras e estratégias de confluência.",
-    version="2.0"
+# Configurações CORS
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# Classe modelo de requisição
-class SignalRequest(BaseModel):
-    par: str
-    timeframe: str
-    estrategia: str
+API_KEY = os.getenv("API_KEY", "default_api_key")
+ENABLED_CONNECTORS = os.getenv("ENABLED_CONNECTORS", "IQ,DERIV,QUOTEX").split(",")
 
-# --- CONFIGURAÇÕES GERAIS ---
+# ============================
+# Conectores Simulados (Mock)
+# ============================
+async def connect_iq(websocket):
+    while True:
+        await asyncio.sleep(1)
+        yield {"broker": "IQ Option", "status": "connected", "price": 1.1254}
 
-API_KEY = os.getenv("API_KEY", "CHAVE_PRIVADA_PADRAO")
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*")
-DATABASE_URL = os.getenv("DATABASE_URL", "")
-ENABLED_CONNECTIONS = os.getenv("ENABLED_CONNECTIONS", "ALL")
+async def connect_deriv(websocket):
+    while True:
+        await asyncio.sleep(1)
+        yield {"broker": "Deriv", "status": "connected", "price": 1.1289}
 
-# --- CREDENCIAIS DAS CORRETORAS ---
+async def connect_quotex(websocket):
+    while True:
+        await asyncio.sleep(1)
+        yield {"broker": "Quotex", "status": "connected", "price": 1.1322}
 
-CORRETORAS = {
-    "avalon": {
-        "email": os.getenv("AVALON_EMAIL"),
-        "senha": os.getenv("AVALON_SENHA")
-    },
-    "deriv": {
-        "token": os.getenv("TOKEN_DERIV")
-    },
-    "iq_option": {
-        "email": os.getenv("IQ_EMAIL"),
-        "senha": os.getenv("IQ_SENHA")
-    },
-    "quotex": {
-        "email": os.getenv("QUOTEX_EMAIL"),
-        "senha": os.getenv("QUOTEX_SENHA")
-    },
-    "bullex": {
-        "email": os.getenv("BULLEX_EMAIL"),
-        "senha": os.getenv("BULLEX_SENHA")
-    },
-    "casatrader": {
-        "email": os.getenv("CASATRADER_EMAIL"),
-        "senha": os.getenv("CASATRADER_SENHA")
-    },
-    "nexbroker": {
-        "email": os.getenv("NEXBROKER_EMAIL"),
-        "senha": os.getenv("NEXBROKER_SENHA")
-    },
-    "polarium": {
-        "email": os.getenv("POLARIUM_E_MAIL"),
-        "senha": os.getenv("POLARIUM_SENHA")
-    }
+# Dicionário de corretoras disponíveis
+BROKER_FUNCTIONS = {
+    "IQ": connect_iq,
+    "DERIV": connect_deriv,
+    "QUOTEX": connect_quotex
 }
 
-# --- CONEXÃO SIMULADA DAS CORRETORAS (exemplo de autenticação assíncrona) ---
+# =====================================
+# Gerenciamento de conexões WebSockets
+# =====================================
+@app.websocket("/ws/{api_key}/{broker}")
+async def websocket_endpoint(websocket: WebSocket, api_key: str, broker: str):
+    if api_key != API_KEY:
+        await websocket.close(code=4001)
+        return
 
-async def conectar_corretora(nome, credenciais):
-    logger.info(f"🔄 Conectando à corretora: {nome.upper()}...")
-    await asyncio.sleep(0.5)  # simula tempo de conexão
-    if not all(credenciais.values()):
-        logger.warning(f"⚠️ Falha ao conectar: credenciais ausentes para {nome}")
-        return False
-    logger.info(f"✅ {nome.upper()} conectada com sucesso.")
-    return True
+    broker = broker.upper()
+    if broker not in BROKER_FUNCTIONS:
+        await websocket.close(code=4002)
+        return
 
+    await websocket.accept()
+    print(f"[INFO] Conexão WebSocket iniciada com {broker}")
 
-# --- INICIALIZAÇÃO DE TODAS AS CORRETORAS ---
+    try:
+        async for data in BROKER_FUNCTIONS[broker](websocket):
+            await websocket.send_json(data)
+    except WebSocketDisconnect:
+        print(f"[INFO] WebSocket desconectado de {broker}")
+        return
+    except Exception as e:
+        print(f"[ERRO] {e}")
+        await websocket.close(code=4003)
+        return
 
-async def inicializar_conexoes():
-    tasks = [conectar_corretora(nome, cred) for nome, cred in CORRETORAS.items()]
-    resultados = await asyncio.gather(*tasks)
-    conectadas = [n for n, r in zip(CORRETORAS.keys(), resultados) if r]
-    logger.info(f"🌐 Corretoras conectadas: {', '.join(conectadas)}")
-    return conectadas
+# =====================================
+# IA de Análise com Confluências
+# =====================================
+@app.post("/analisar")
+async def analisar_dados(payload: dict):
+    # Exemplo de análise simulada
+    simbolo = payload.get("simbolo", "USD/BRL")
+    timeframe = payload.get("timeframe", "M1")
+    estrategia = payload.get("estrategia", "confluencia_total")
 
-
-# --- ROTA INICIAL ---
-
-@app.get("/")
-async def root():
-    return {"status": "✅ API ImperadorVIP Online e Conectada!"}
-
-
-# --- ROTA PARA TESTAR CONEXÕES DAS CORRETORAS ---
-
-@app.get("/status")
-async def status():
-    conectadas = await inicializar_conexoes()
-    return {"corretoras_ativas": conectadas}
-
-
-# --- ROTA DE SINAIS DE CONFLUÊNCIA ---
-
-@app.post("/signal")
-async def gerar_sinal(request: SignalRequest):
-    logger.info(f"🧠 Analisando {request.par} | Timeframe {request.timeframe} | Estratégia: {request.estrategia}")
-
-    # Aqui seria integrado seu analisador real de confluências
-    await asyncio.sleep(1)
-
-    resposta = {
-        "par": request.par,
-        "timeframe": request.timeframe,
-        "estrategia": request.estrategia,
-        "sinal": "CALL" if request.par.endswith("USD") else "PUT",
-        "confluencias": ["EMA", "RSI", "Suporte", "Price Action"],
-        "status": "✅ Análise concluída com sucesso!"
+    analise = {
+        "ativo": simbolo,
+        "timeframe": timeframe,
+        "estrategia": estrategia,
+        "indicadores": {
+            "LTA/LTB": "confirmado",
+            "Rompimento": "detectado",
+            "Retração": "forte",
+            "Canal de Alta": "ativo",
+        },
+        "sinal_final": "CALL",
+        "confianca": "93%"
     }
 
-    return resposta
+    return {"resultado": analise, "status": "ok"}
 
+# =====================================
+# Health Check
+# =====================================
+@app.get("/")
+async def root():
+    return {"status": "online", "message": "IA ImperadorVIP ativa e rodando com sucesso."}
 
-# --- INICIALIZADOR PRINCIPAL ---
-
-if __name__ == "__main__":
-    import uvicorn
-    asyncio.run(inicializar_conexoes())
-    uvicorn.run(app, host="0.0.0.0", port=8000)
