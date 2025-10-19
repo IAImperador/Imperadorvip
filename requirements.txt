@@ -3,4 +3,4 @@ uvicorn==0.30.6
 websocket-client==1.8.0
 rel==0.4.9
 sqlalchemy==2.0.34
-psycopg2-binary==2.9.9
+psycopg[binary]
