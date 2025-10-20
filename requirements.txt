@@ -7,3 +7,4 @@ numpy==1.26.2
 ta==0.11.0
 ccxt==4.1.77
 python-binance==1.0.19
+pydantic==2.5.0
