@@ -1,3 +1,15 @@
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://imperadorvip.base44.app",
+        "https://app.base44.io",
+        "https://studio.base44.io",
+        "*"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 # ======================================================
 # 🚀 IMPERADORVIP - IA de Confluência Multi-Corretoras
 # ======================================================
@@ -122,4 +134,5 @@ async def shutdown_event():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=True)
+
 
