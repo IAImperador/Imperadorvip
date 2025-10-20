@@ -1,15 +1,3 @@
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "https://imperadorvip.base44.app",
-        "https://app.base44.io",
-        "https://studio.base44.io",
-        "*"
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 # ======================================================
 # 🚀 IMPERADORVIP - IA de Confluência Multi-Corretoras
 # ======================================================
@@ -25,11 +13,14 @@ import asyncio
 
 app = FastAPI(title="ImperadorVIP IA", version="2.0")
 
-# 🔥 Permite conexões da Base44 e outros domínios
+# 🔥 Permite conexões da Base44 e outros domínios autorizados
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "*",  # ou substitua por: "https://imperadorvip.base44.app", "https://app.base44.io"
+        "https://imperadorvip.base44.app",
+        "https://app.base44.io",
+        "https://studio.base44.io",
+        "*"  # ⚠️ Em produção, substitua pelo domínio exato do seu app
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -81,7 +72,7 @@ async def initialize_ai():
     print(f"📦 Banco: {DATABASE_URL}")
     print("===============================================")
     await asyncio.sleep(1)
-    print("✅ IA carregada e pronta!")
+    print("✅ IA carregada e pronta para operação!")
 
 # ======================================================
 # 🌐 ROTAS PRINCIPAIS
@@ -93,9 +84,8 @@ async def root():
         "status": "online",
         "app": APP_NAME,
         "brokers_enabled": BROKERS_ENABLED,
-        "message": f"IA {APP_NAME} conectada com sucesso.",
+        "message": f"IA {APP_NAME} conectada com sucesso à Base44 e Railway.",
     }
-
 
 @app.get("/health")
 async def health_check():
@@ -104,8 +94,8 @@ async def health_check():
         "region": REGION,
         "timezone": TIMEZONE,
         "brokers_count": len(BROKERS_ENABLED),
+        "database_connected": DATABASE_URL != "not_configured"
     }
-
 
 @app.get("/brokers")
 async def list_brokers():
@@ -128,11 +118,10 @@ async def shutdown_event():
     print("🔴 Servidor encerrando conexões...")
 
 # ======================================================
-# 🧩 EXECUÇÃO LOCAL (debug)
+# 🧩 EXECUÇÃO LOCAL (modo debug)
 # ======================================================
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=True)
-
 
