@@ -1,4 +1,18 @@
-# ======================================================
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+app = FastAPI()
+
+# 🔥 ADICIONE ISTO - CONFIGURAÇÃO CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Permite todas as origens
+    allow_credentials=True,
+    allow_methods=["*"],  # Permite todos os métodos
+    allow_headers=["*"],  # Permite todos os headers
+)
+
+# ... resto do seu código abaixo# ======================================================
 # 🚀 IMPERADORVIP - Servidor IA para Análise de Corretores
 # ======================================================
 
@@ -87,3 +101,4 @@ async def list_brokers():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=PORT)
+
