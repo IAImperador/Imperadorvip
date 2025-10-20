@@ -12,7 +12,6 @@ app.add_middleware(
     allow_headers=["*"],  # Permite todos os headers
 )
 
-# ... resto do seu código abaixo# ======================================================
 # 🚀 IMPERADORVIP - Servidor IA para Análise de Corretores
 # ======================================================
 
@@ -101,4 +100,5 @@ async def list_brokers():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=PORT)
+
 
