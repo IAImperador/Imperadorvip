@@ -36,10 +36,18 @@ app.add_middleware(
 # 🔧 VARIÁVEIS DE AMBIENTE
 # ======================================================
 
-APP_NAME = os.getenv("APP_NAME", "ImperadorVIP")
-PORT = int(os.getenv("PORT", "8080"))
-API_KEY = os.getenv("API_KEY", "imperadorvip-secure-key-2025")
-TWELVEDATA_KEY = os.getenv("TWELVEDATA_KEY", "aa65a6636b6f48c2a7970e02611b25f0")
+{
+  "PORT": "8080",
+  "APP_NAME": "ImperadorVIP",
+  "API_KEY": "imperadorvip-secure-key-2025",
+  "DEBUG": "True",
+  "TWELVEDATA_KEY": "aa65a6636b6f48c2a7970e02611b25f0",
+  "TELEGRAM_BOT_TOKEN": "7651355262:AAHuHi19fiGfrOBVUYKGmDAtmBvncrfUab4",
+  "TELEGRAM_CHAT_ID": "@IAdoimperador",
+  "ASSET_SYNC_MODE": "static",
+  "DATABASE_URL": "postgresql://postgres:PupyxufIHhXWuTuIEIAoGIfdYeUgpt@mainline.proxy.rlwy.net:16060/railway",
+  "ENABLED_CONNECTORS": "quotex,iq,deriv,bullex,broker10"
+}
 
 # ======================================================
 # 💹 CORRETORAS SUPORTADAS
@@ -162,4 +170,5 @@ async def analyze(request: Request):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=True)
+
 
