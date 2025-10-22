@@ -56,26 +56,21 @@ BROKERS = [
 # ⚙️ FUNÇÃO: BUSCAR DADOS DE PREÇO EM TEMPO REAL
 # ======================================================
 
-def fetch_price_data(symbol: str, interval: str = "1min"):
-    try:
-        url = (
-            f"https://api.twelvedata.com/time_series?"
-            f"symbol={symbol}&interval={interval}&apikey={TWELVEDATA_KEY}&outputsize=100"
-        )
-        response = requests.get(url, timeout=10)
-        data = response.json()
+# === Buscar dados reais de preço ===
+url = f"https://api.twelvedata.com/time_series"
+params = {
+    "symbol": symbol,
+    "interval": interval,
+    "apikey": TWELVEDATA_KEY,
+    "outputsize": 100
+}
+headers = {"Content-Type": "application/json"}
 
-        if "values" not in data:
-            raise ValueError("Sem dados válidos recebidos da API TwelveData.")
+response = requests.get(url, params=params, headers=headers)
+data = response.json()
 
-        df = pd.DataFrame(data["values"])
-        df = df.astype({"open": float, "close": float, "high": float, "low": float})
-        df = df.iloc[::-1]  # Corrige a ordem dos candles
-        return df
-
-    except Exception as e:
-        print(f"[Erro TwelveData] {e}")
-        raise HTTPException(status_code=500, detail=f"Falha ao consultar TwelveData: {e}")
+if "values" not in data:
+    raise HTTPException(status_code=400, detail=f"Erro ao buscar dados: {data}")
 
 # ======================================================
 # 🧠 IA DE ANÁLISE DE CONFLUÊNCIAS
@@ -167,3 +162,4 @@ async def analyze(request: Request):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=True)
+
