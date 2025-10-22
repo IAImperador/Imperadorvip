@@ -1,351 +1,598 @@
 # ======================================================
-# 🚀 IMPERADORVIP 4.0 - IA DE CONFLUÊNCIA MULTI-CORRETORAS
+# 🚀 IMPERADORVIP - IA de Confluência Multi-Corretoras (Real-Time)
+# Back-end para Base44 + Railway + Telegram
+# Versão 4.5 — Indicadores + Padrões + Confluências Profissionais
 # ======================================================
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
-import os, requests, pandas as pd, numpy as np, ta
-from typing import List
+from pydantic import BaseModel
+from typing import Dict, List, Optional, Tuple
 
-app = FastAPI(title="ImperadorVIP IA", version="4.0")
+import os, requests
+import pandas as pd
+import numpy as np
+import ta
 
-# ⚠️ CORS CONFIGURADO PARA ACEITAR TODAS AS ORIGENS
+# ------------------------------------------------------
+# App + CORS
+# ------------------------------------------------------
+app = FastAPI(title="ImperadorVIP IA", version="4.5")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://imperadorvip.base44.app",
+        "https://app.base44.io",
+        "https://studio.base44.io",
+        "https://base44.app",
+        "*",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ======================================================
-# 🔧 VARIÁVEIS DE AMBIENTE
-# ======================================================
+# ------------------------------------------------------
+# Env
+# ------------------------------------------------------
+APP_NAME        = os.getenv("APP_NAME", "ImperadorVIP")
+PORT            = int(os.getenv("PORT", "8080"))
+API_KEY         = os.getenv("API_KEY", "imperadorvip-secure-key-2025")
 
-PORT = int(os.getenv("PORT", "8080"))
-API_KEY = os.getenv("API_KEY", "imperadorvip-secure-key-2025")
-TWELVEDATA_KEY = os.getenv("TWELVEDATA_KEY", "393d2b211f1b455980789f110b6e24cb")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "7651355262:AAHuHi19fiGfrOBVUYKGmDAtmBvncrfUab4")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "@IAdoimperador")
-BOT_ACTIVE = False
+TWELVEDATA_KEY  = os.getenv("TWELVEDATA_KEY", "demo")  # coloque sua chave real
+TD_BASE         = "https://api.twelvedata.com"
+HTTP_TIMEOUT    = 12
+
+TG_TOKEN        = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TG_CHAT         = os.getenv("TELEGRAM_CHAT_ID", "")
+BOT_AUTO        = os.getenv("BOT_AUTO", "false").lower() == "true"
 
 # ======================================================
-# 💹 CORRETORAS E ATIVOS SUPORTADOS
+# 📚 Catálogo de corretoras e ativos (ajustável)
 # ======================================================
+BROKERS: Dict[str, Dict[str, List[str]]] = {
+    "Deriv": {
+        "binaria": ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD"],
+        "indices": ["US500", "NAS100", "JPN225"],
+        "cripto":  ["BTC/USD", "ETH/USD"],
+    },
+    "Quotex": {
+        "binaria": ["EUR/USD", "GBP/USD", "USD/JPY", "EUR/JPY", "AUD/USD"],
+        "cripto":  ["BTC/USD", "ETH/USD"],
+        "commodities": ["XAU/USD", "XAG/USD"],
+    },
+    "IQ Option": {
+        "digital": ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD"],
+        "binaria": ["EUR/JPY", "USD/CHF"],
+        "cripto":  ["BTC/USD", "ETH/USD"],
+        "indices": ["US500", "NAS100"],
+    },
+    "Binomo": {
+        "binaria": ["EUR/USD", "USD/JPY", "GBP/USD", "EUR/JPY"],
+        "cripto":  ["BTC/USD"],
+    },
+    "Pocket Option": {
+        "binaria": ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD"],
+        "cripto":  ["BTC/USD", "ETH/USD"],
+    },
+    "Olymp Trade": {
+        "binaria": ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "EUR/JPY"],
+        "indices": ["US500"],
+    },
+    "Avalon": {
+        "binaria": ["EUR/USD", "USD/JPY", "GBP/USD"],
+    },
+    "BulleX": {
+        "binaria": ["EUR/USD", "GBP/USD", "USD/JPY"],
+        "cripto":  ["BTC/USD"],
+    },
+    "Casa Trader": {
+        "binaria": ["EUR/USD", "USD/JPY", "GBP/USD"],
+    },
+    "NexBroker": {
+        "binaria": ["EUR/USD", "GBP/USD", "USD/JPY"],
+        "indices": ["US500"],
+    },
+    # Escritas corrigidas conforme você pediu:
+    "Polaryum": {
+        "binaria": ["EUR/USD", "GBP/USD", "USD/JPY"],
+    },
+    "Broker10": {
+        "binaria": ["EUR/USD", "USD/JPY", "GBP/USD"],
+    },
+}
 
-BROKERS = {
-    "Deriv": ["EUR/USD", "GBP/JPY", "AUD/USD", "USD/CAD", "BTC/USD", "ETH/USD"],
-    "Quotex": ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/CAD", "GBP/JPY", "EUR/JPY", "USD/BRL", "AUD/JPY"],
-    "IQ Option": ["EUR/USD", "USD/CHF", "EUR/JPY", "GBP/AUD", "BTC/USD"],
-    "Binomo": ["EUR/USD", "AUD/USD", "NZD/USD", "USD/JPY", "AUD/JPY"],
-    "Pocket Option": ["EUR/USD", "BTC/USD", "ETH/USD", "GBP/JPY", "USD/JPY"],
-    "Olymp Trade": ["EUR/USD", "USD/JPY", "AUD/CAD", "NZD/JPY", "GBP/USD"],
-    "Avalon": ["EUR/USD", "USD/JPY", "GBP/USD", "BTC/USD", "AUD/JPY"],
-    "BulleX": ["EUR/USD", "USD/CHF", "BTC/USD", "ETH/USD", "USD/JPY"],
-    "Casa Trader": ["EUR/USD", "USD/JPY", "EUR/GBP", "AUD/USD", "GBP/USD"],
-    "NexBroker": ["EUR/USD", "GBP/USD", "USD/JPY", "BTC/USD", "GBP/JPY"],
-    "Polaryum": ["EUR/USD", "GBP/USD", "USD/JPY", "BTC/USD", "ETH/USD"],
-    "Broker10": ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD"]
+SUPPORTED_INTERVALS = {
+    "M1": "1min",
+    "M5": "5min",
+    "M15": "15min",
+    "M30": "30min",
+    "H1": "1h",
+    "H4": "4h",
 }
 
 # ======================================================
-# 🌐 ROTAS PRINCIPAIS
+# 🧩 Utilidades HTTP / Telegram
+# ======================================================
+
+def _normalize_symbol_for_td(symbol: str) -> str:
+    return symbol.strip().upper()
+
+def _fetch_series_from_twelvedata(symbol: str, td_interval: str, outputsize: int = 500) -> pd.DataFrame:
+    url = f"{TD_BASE}/time_series"
+    params = {
+        "symbol": symbol,
+        "interval": td_interval,
+        "apikey": TWELVEDATA_KEY,
+        "outputsize": outputsize,
+        "order": "desc",
+    }
+    r = requests.get(url, params=params, timeout=HTTP_TIMEOUT)
+    data = r.json()
+    if "values" not in data:
+        raise HTTPException(status_code=400, detail=f"Erro TwelveData: {data.get('message','dados ausentes')}")
+    df = pd.DataFrame(data["values"])
+    for col in ["open", "high", "low", "close"]:
+        df[col] = df[col].astype(float)
+    if "volume" in df.columns:
+        df["volume"] = df["volume"].astype(float)
+    else:
+        # Alguns símbolos/intervalos não trazem volume → assuma 0
+        df["volume"] = 0.0
+    # ordem cronológica crescente
+    df = df.iloc[::-1].reset_index(drop=True)
+    return df
+
+def _tg_send(text: str) -> None:
+    if not TG_TOKEN or not TG_CHAT:
+        return
+    try:
+        url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+        payload = {"chat_id": TG_CHAT, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
+        requests.post(url, json=payload, timeout=HTTP_TIMEOUT)
+    except Exception:
+        pass
+
+# ======================================================
+# 🧠 Cálculo de Indicadores
+# ======================================================
+
+def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    close = df["close"]
+    high  = df["high"]
+    low   = df["low"]
+    vol   = df["volume"]
+
+    # Tendência / Médias
+    df["ema9"]   = ta.trend.EMAIndicator(close, window=9).ema_indicator()
+    df["ema21"]  = ta.trend.EMAIndicator(close, window=21).ema_indicator()
+    df["sma50"]  = close.rolling(50).mean()
+    df["sma200"] = close.rolling(200).mean()
+
+    # Momentum
+    rsi = ta.momentum.RSIIndicator(close, window=14)
+    df["rsi"]    = rsi.rsi()
+    macd = ta.trend.MACD(close)
+    df["macd"]   = macd.macd()
+    df["macd_sig"]= macd.macd_signal()
+    df["roc"]    = ta.momentum.ROCIndicator(close, window=12).roc()
+
+    # Volatilidade
+    bb = ta.volatility.BollingerBands(close, window=20, window_dev=2)
+    df["bb_h"] = bb.bollinger_hband()
+    df["bb_l"] = bb.bollinger_lband()
+    df["atr"]  = ta.volatility.AverageTrueRange(high, low, close, window=14).average_true_range()
+
+    # Osciladores adicionais
+    df["stoch"] = ta.momentum.StochasticOscillator(high, low, close, window=14, smooth_window=3).stoch()
+    df["cci"]   = ta.trend.CCIIndicator(high, low, close, window=20).cci()
+    df["wr"]    = ta.momentum.WilliamsRIndicator(high, low, close, lbp=14).williams_r()
+    df["adx"]   = ta.trend.ADXIndicator(high, low, close, window=14).adx()
+
+    # Volume/Fluxo
+    df["obv"]   = ta.volume.OnBalanceVolumeIndicator(close, vol).on_balance_volume()
+    mfi = ta.volume.MFIIndicator(high, low, close, vol, window=14)
+    df["mfi"]   = mfi.money_flow_index()
+
+    return df
+
+# ======================================================
+# 🕯️ Padrões de Vela (detecção simples, eficiente)
+# ======================================================
+
+def _body(o, c): return abs(c - o)
+def _upper_shadow(h, o, c): return h - max(o, c)
+def _lower_shadow(l, o, c): return min(o, c) - l
+
+def detect_candles(df: pd.DataFrame) -> Dict[str, bool]:
+    """Detecta alguns padrões clássicos na última barra."""
+    i = len(df) - 1
+    if i < 3:
+        return {}
+
+    o = df["open"].iloc[i]; c = df["close"].iloc[i]
+    h = df["high"].iloc[i]; l = df["low"].iloc[i]
+    prev_o = df["open"].iloc[i-1]; prev_c = df["close"].iloc[i-1]
+
+    rng = max(1e-9, h - l)
+    body = _body(o, c)
+    us   = _upper_shadow(h, o, c)
+    ls   = _lower_shadow(l, o, c)
+
+    small_body  = body <= 0.25 * rng
+    long_body   = body >= 0.6  * rng
+    long_upper  = us   >= 0.6  * rng
+    long_lower  = ls   >= 0.6  * rng
+
+    bull = c > o
+    bear = c < o
+
+    # Engolfo
+    bull_engulf = bull and (o <= prev_c) and (c >= prev_o) and (prev_c < prev_o)
+    bear_engulf = bear and (o >= prev_c) and (c <= prev_o) and (prev_c > prev_o)
+
+    # Doji
+    doji = small_body and us > 0.1*rng and ls > 0.1*rng
+
+    # Martelo (hammer) e invertido
+    hammer = long_lower and not long_upper and small_body and bull
+    inv_hammer = long_upper and not long_lower and small_body and bull
+
+    # Shooting Star / Estrela Cadente
+    shooting = long_upper and small_body and bear
+
+    # Harami (pequeno corpo dentro do corpo anterior)
+    prev_body_high = max(prev_o, prev_c)
+    prev_body_low  = min(prev_o, prev_c)
+    harami_bull = bull and (max(o,c) < prev_body_high) and (min(o,c) > prev_body_low) and (prev_c < prev_o)
+    harami_bear = bear and (max(o,c) < prev_body_high) and (min(o,c) > prev_body_low) and (prev_c > prev_o)
+
+    # Três Soldados Brancos / Três Corvos Pretos (simples)
+    last3 = df.iloc[i-2:i+1]
+    tres_soldados = (last3["close"] > last3["open"]).all() and (last3["close"].diff() > 0).all()
+    tres_corvos   = (last3["close"] < last3["open"]).all() and (last3["close"].diff() < 0).all()
+
+    return {
+        "bull_engulf": bool(bull_engulf),
+        "bear_engulf": bool(bear_engulf),
+        "doji": bool(doji),
+        "hammer": bool(hammer),
+        "inverted_hammer": bool(inv_hammer),
+        "shooting_star": bool(shooting),
+        "harami_bull": bool(harami_bull),
+        "harami_bear": bool(harami_bear),
+        "three_white_soldiers": bool(tres_soldados),
+        "three_black_crows": bool(tres_corvos),
+    }
+
+# ======================================================
+# 📈 S/R, LTA/LTB, Canal, Fibonacci, Regras auxiliares
+# ======================================================
+
+def rolling_pivots(df: pd.DataFrame, win: int = 20) -> Tuple[float, float]:
+    """Suporte/Resistência por máximas/mínimas recentes."""
+    recent = df.tail(win)
+    return float(recent["low"].min()), float(recent["high"].max())
+
+def trend_line(df: pd.DataFrame, win: int = 50) -> Tuple[float, float]:
+    """
+    Ajuste de regressão linear simples sobre 'close' para estimar LTA/LTB.
+    Retorna (slope, last_fit_value).
+    """
+    if len(df) < win: win = len(df)
+    y = df["close"].tail(win).values
+    x = np.arange(len(y))
+    # coeficientes da reta y = ax + b
+    a, b = np.polyfit(x, y, 1)
+    return float(a), float(a * (len(x)-1) + b)
+
+def channel_bounds(df: pd.DataFrame, win: int = 50, dev: float = 1.5) -> Tuple[float, float]:
+    """Canal por regressão + desvio padrão."""
+    if len(df) < win: win = len(df)
+    y = df["close"].tail(win).values
+    x = np.arange(len(y))
+    a, b = np.polyfit(x, y, 1)
+    fit = a * x + b
+    std = np.std(y - fit)
+    return float(fit[-1] - dev*std), float(fit[-1] + dev*std)
+
+def fibo_retracement(df: pd.DataFrame, win: int = 60) -> Dict[str, float]:
+    """Níveis de Fibonacci do último swing."""
+    if len(df) < win: win = len(df)
+    seg = df.tail(win)
+    high = float(seg["high"].max())
+    low  = float(seg["low"].min())
+    diff = high - low if high != low else 1e-9
+    return {
+        "0.0": high,
+        "0.236": high - 0.236*diff,
+        "0.382": high - 0.382*diff,
+        "0.5": high - 0.5*diff,
+        "0.618": high - 0.618*diff,
+        "0.786": high - 0.786*diff,
+        "1.0": low
+    }
+
+def daily_price_limits(df: pd.DataFrame) -> Tuple[float, float]:
+    """Faixa diária simples (últimas 24 barras se M1)."""
+    recent = df.tail(24) if len(df) >= 24 else df
+    return float(recent["low"].min()), float(recent["high"].max())
+
+def first_bar_of_session(df: pd.DataFrame) -> bool:
+    """Proxy simples: primeira barra do último bloco de 60 (apenas para ponderar)."""
+    return (len(df) % 60) == 1
+
+# ======================================================
+# 🧮 Motor de Confluência (pontuação -> sinal)
+# ======================================================
+
+def confluence_engine(df: pd.DataFrame) -> Dict:
+    """
+    Combina indicadores, padrões e estruturas em uma pontuação 0..100.
+    Regras desenhadas para estabilidade (não quebrar se faltar dado).
+    """
+    i = len(df) - 1
+    c = df["close"].iloc[i]
+    o = df["open"].iloc[i]
+    h = df["high"].iloc[i]
+    l = df["low"].iloc[i]
+
+    # --- Indicadores (com try para blindagem) ---
+    score = 50  # base neutra
+    reasons = []
+
+    try:
+        # Tendência
+        if df["ema9"].iloc[i] > df["ema21"].iloc[i]: score += 4; reasons.append("EMA9>EMA21")
+        if df["sma50"].iloc[i] > df["sma200"].iloc[i]: score += 3; reasons.append("SMA50>SMA200")
+        if df["adx"].iloc[i] > 20:
+            reasons.append("ADX>20")
+            score += 2
+
+        # Momentum / Osciladores
+        if df["rsi"].iloc[i] < 30: score += 5; reasons.append("RSI<30")
+        elif df["rsi"].iloc[i] > 70: score -= 5; reasons.append("RSI>70")
+
+        if df["stoch"].iloc[i] < 20: score += 4; reasons.append("Stoch<20")
+        elif df["stoch"].iloc[i] > 80: score -= 4; reasons.append("Stoch>80")
+
+        if df["macd"].iloc[i] > df["macd_sig"].iloc[i]: score += 3; reasons.append("MACD>Signal")
+        else: score -= 1
+
+        if df["wr"].iloc[i] < -80: score += 2; reasons.append("W%R<-80")
+        elif df["wr"].iloc[i] > -20: score -= 2; reasons.append("W%R>-20")
+
+        if df["cci"].iloc[i] < -100: score += 2; reasons.append("CCI<-100")
+        elif df["cci"].iloc[i] > 100: score -= 2; reasons.append("CCI>100")
+
+        if df["mfi"].iloc[i] < 20: score += 2; reasons.append("MFI<20")
+        elif df["mfi"].iloc[i] > 80: score -= 2; reasons.append("MFI>80")
+
+        # Volatilidade / Bandas
+        if c <= df["bb_l"].iloc[i]: score += 3; reasons.append("Preço na banda inferior")
+        if c >= df["bb_h"].iloc[i]: score -= 3; reasons.append("Preço na banda superior")
+
+        # Momentum adicional
+        if df["roc"].iloc[i] > 0: score += 1
+        else: score -= 1
+    except Exception:
+        pass
+
+    # --- Padrões de vela ---
+    try:
+        patt = detect_candles(df)
+        if patt.get("hammer"): score += 4; reasons.append("Hammer")
+        if patt.get("inverted_hammer"): score += 2; reasons.append("Inverted Hammer")
+        if patt.get("shooting_star"): score -= 4; reasons.append("Shooting Star")
+        if patt.get("bull_engulf"): score += 5; reasons.append("Bull Engulf")
+        if patt.get("bear_engulf"): score -= 5; reasons.append("Bear Engulf")
+        if patt.get("harami_bull"): score += 2; reasons.append("Harami Bull")
+        if patt.get("harami_bear"): score -= 2; reasons.append("Harami Bear")
+        if patt.get("three_white_soldiers"): score += 6; reasons.append("3 White Soldiers")
+        if patt.get("three_black_crows"): score -= 6; reasons.append("3 Black Crows")
+        if patt.get("doji"): reasons.append("Doji (neutro)")
+    except Exception:
+        pass
+
+    # --- Estruturas: S/R, LTA/LTB, Canal, Fibo ---
+    try:
+        sup, res = rolling_pivots(df, win=20)
+        if c <= sup * 1.001: score += 3; reasons.append("Na região de Suporte")
+        if c >= res * 0.999: score -= 3; reasons.append("Na região de Resistência")
+    except Exception:
+        pass
+
+    try:
+        slope, last_fit = trend_line(df, win=50)
+        if slope > 0: score += 2; reasons.append("LTA")
+        elif slope < 0: score -= 2; reasons.append("LTB")
+    except Exception:
+        pass
+
+    try:
+        ch_low, ch_high = channel_bounds(df, win=50, dev=1.6)
+        if c <= ch_low: score += 2; reasons.append("Canal - base")
+        if c >= ch_high: score -= 2; reasons.append("Canal - topo")
+    except Exception:
+        pass
+
+    try:
+        fib = fibo_retracement(df, win=60)
+        # aproximações a 0.382/0.618 ajudam a reversão
+        if abs(c - fib["0.618"]) <= (df["atr"].iloc[-1] * 0.2): score += 2; reasons.append("Fibo 61.8%")
+        if abs(c - fib["0.382"]) <= (df["atr"].iloc[-1] * 0.2): score += 1; reasons.append("Fibo 38.2%")
+    except Exception:
+        pass
+
+    # --- Regras auxiliares ---
+    try:
+        dmin, dmax = daily_price_limits(df)
+        if c <= dmin * 1.001: score += 1; reasons.append("Limite diário inferior")
+        if c >= dmax * 0.999: score -= 1; reasons.append("Limite diário superior")
+    except Exception:
+        pass
+
+    try:
+        if first_bar_of_session(df): reasons.append("Primeiro registro da sessão"); score = int(score * 0.9)
+    except Exception:
+        pass
+
+    # Clamp e decisão
+    score = int(max(0, min(100, score)))
+    if score >= 62:
+        signal = "CALL"
+    elif score <= 38:
+        signal = "PUT"
+    else:
+        signal = "WAIT"
+
+    return {"signal": signal, "confidence": score, "reasons": reasons}
+
+# ======================================================
+# 🔌 Modelos
+# ======================================================
+
+class AnalyzePayload(BaseModel):
+    broker: str
+    symbol: str
+    timeframe: str = "M1"            # M1/M5/M15/M30/H1/H4
+    market: Optional[str] = "OTC"
+    auto: Optional[bool] = False
+
+# ======================================================
+# 🌐 Endpoints
 # ======================================================
 
 @app.get("/")
 def root():
     return {
         "status": "online",
-        "app": "ImperadorVIP IA 4.0",
-        "brokers_supported": list(BROKERS.keys()),
-        "api_key_configured": bool(TWELVEDATA_KEY and TWELVEDATA_KEY != "demo"),
-        "telegram_configured": bool(TELEGRAM_BOT_TOKEN),
-        "message": "IA ImperadorVIP conectada com sucesso à Base44, Railway e Telegram."
+        "app": APP_NAME,
+        "message": f"IA {APP_NAME} ligada com sucesso.",
+        "brokers_enabled": list(BROKERS.keys()),
+        "bot_auto": BOT_AUTO,
     }
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "brokers_count": len(BROKERS)}
+    return {"status": "healthy", "brokers_count": len(BROKERS), "bot_auto": BOT_AUTO}
 
 @app.get("/brokers")
 def list_brokers():
-    return {"brokers": BROKERS}
+    return {"brokers": list(BROKERS.keys())}
 
-# ======================================================
-# 🧠 ENDPOINT /analyze (ANÁLISE REAL COM TWELVEDATA)
-# ======================================================
+@app.get("/catalog")
+def catalog():
+    return {"catalog": BROKERS}
+
+@app.get("/assets")
+def assets(broker: str = Query(..., description="Nome exato da corretora")):
+    broker = broker.strip()
+    if broker not in BROKERS:
+        raise HTTPException(status_code=404, detail=f"Broker '{broker}' não suportado.")
+    return {"broker": broker, "assets": BROKERS[broker]}
 
 @app.post("/analyze")
-async def analyze(request: Request):
+def analyze(payload: AnalyzePayload):
+    broker = payload.broker.strip()
+    if broker not in BROKERS:
+        raise HTTPException(status_code=404, detail=f"Broker '{broker}' não suportado.")
+
+    tf = payload.timeframe.upper().strip()
+    if tf not in SUPPORTED_INTERVALS:
+        raise HTTPException(status_code=400, detail=f"Timeframe inválido. Use {list(SUPPORTED_INTERVALS.keys())}.")
+
+    symbol = payload.symbol.strip().upper()
+    broker_assets_flat = {a for lst in BROKERS[broker].values() for a in lst}
+    if symbol not in broker_assets_flat:
+        raise HTTPException(status_code=400, detail=f"O ativo '{symbol}' não existe/está habilitado na corretora '{broker}'.")
+
+    td_symbol  = _normalize_symbol_for_td(symbol)
+    td_interval= SUPPORTED_INTERVALS[tf]
+
     try:
-        body = await request.json()
-        broker = body.get("broker", "Quotex")
-        symbol = body.get("symbol", "EUR/USD")
-        interval = body.get("interval", "1min")
-        market = body.get("market", "Aberto")
-
-        # Validações
-        if broker not in BROKERS:
-            raise HTTPException(status_code=400, detail=f"Corretora {broker} não suportada.")
-
-        if symbol not in BROKERS[broker]:
-            raise HTTPException(status_code=400, detail=f"Ativo {symbol} não disponível na {broker}.")
-
-        # Buscar dados reais do mercado
-        symbol_clean = symbol.replace("/", "")
-        url = f"https://api.twelvedata.com/time_series?symbol={symbol_clean}&interval={interval}&apikey={TWELVEDATA_KEY}&outputsize=100"
-
-        print(f"🔍 Buscando dados de {symbol} via TwelveData...")
-        response = requests.get(url, timeout=10)
-        data = response.json()
-
-        if "values" not in data:
-            error_msg = data.get("message", "Erro desconhecido")
-            print(f"❌ Erro TwelveData: {error_msg}")
-            raise HTTPException(status_code=400, detail=f"Erro ao buscar dados: {error_msg}")
-
-        # Processar dados
-        df = pd.DataFrame(data["values"])
-        df = df.astype({"open": float, "close": float, "high": float, "low": float, "volume": int})
-        df = df.iloc[::-1]  # Inverter ordem (mais recente por último)
-
-        print(f"✅ Dados recebidos: {len(df)} candles")
-
-        # Calcular indicadores técnicos
-        df["rsi"] = ta.momentum.RSIIndicator(df["close"], window=14).rsi()
-        df["ema_fast"] = ta.trend.EMAIndicator(df["close"], window=9).ema_indicator()
-        df["ema_slow"] = ta.trend.EMAIndicator(df["close"], window=21).ema_indicator()
-
-        macd = ta.trend.MACD(df["close"])
-        df["macd"] = macd.macd()
-        df["macd_signal"] = macd.macd_signal()
-
-        bollinger = ta.volatility.BollingerBands(df["close"])
-        df["bb_high"] = bollinger.bollinger_hband()
-        df["bb_low"] = bollinger.bollinger_lband()
-
-        df["stochastic"] = ta.momentum.StochasticOscillator(df["high"], df["low"], df["close"]).stoch()
-        df["atr"] = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"]).average_true_range()
-        df["adx"] = ta.trend.ADXIndicator(df["high"], df["low"], df["close"]).adx()
-
-        # Última linha (sinal atual)
-        last = df.iloc[-1]
-
-        # Lógica de sinal baseada em múltiplos indicadores
-        indicators_list = []
-        confidence = 85
-        bullish_signals = 0
-        bearish_signals = 0
-
-        # 1. RSI
-        if last["rsi"] < 30:
-            indicators_list.append(f"✓ RSI(14): {last['rsi']:.1f} - Sobrevenda forte (BULLISH)")
-            confidence += 3
-            bullish_signals += 1
-        elif last["rsi"] > 70:
-            indicators_list.append(f"✓ RSI(14): {last['rsi']:.1f} - Sobrecompra forte (BEARISH)")
-            confidence += 3
-            bearish_signals += 1
-        else:
-            indicators_list.append(f"✓ RSI(14): {last['rsi']:.1f} - Neutro")
-            confidence += 1
-            if last["rsi"] < 50:
-                bullish_signals += 0.5
-            else:
-                bearish_signals += 0.5
-
-        # 2. MACD
-        if last["macd"] > last["macd_signal"]:
-            indicators_list.append("✓ MACD: Cruzamento bullish confirmado")
-            confidence += 2
-            bullish_signals += 1
-        else:
-            indicators_list.append("✓ MACD: Cruzamento bearish confirmado")
-            confidence += 2
-            bearish_signals += 1
-
-        # 3. EMA
-        if last["ema_fast"] > last["ema_slow"]:
-            indicators_list.append("✓ EMA 9/21: Golden Cross (BULLISH)")
-            confidence += 2
-            bullish_signals += 1
-        else:
-            indicators_list.append("✓ EMA 9/21: Death Cross (BEARISH)")
-            confidence += 2
-            bearish_signals += 1
-
-        # 4. Bollinger Bands
-        if last["close"] < last["bb_low"]:
-            indicators_list.append("✓ Bollinger: Preço abaixo da banda inferior (BULLISH)")
-            confidence += 2
-            bullish_signals += 1
-        elif last["close"] > last["bb_high"]:
-            indicators_list.append("✓ Bollinger: Preço acima da banda superior (BEARISH)")
-            confidence += 2
-            bearish_signals += 1
-        else:
-            indicators_list.append("✓ Bollinger: Preço dentro das bandas")
-            confidence += 1
-
-        # 5. Stochastic
-        if last["stochastic"] < 20:
-            indicators_list.append(f"✓ Stochastic: {last['stochastic']:.1f} - Oversold (BULLISH)")
-            confidence += 2
-            bullish_signals += 1
-        elif last["stochastic"] > 80:
-            indicators_list.append(f"✓ Stochastic: {last['stochastic']:.1f} - Overbought (BEARISH)")
-            confidence += 2
-            bearish_signals += 1
-        else:
-            indicators_list.append(f"✓ Stochastic: {last['stochastic']:.1f}")
-            confidence += 1
-
-        # 6. ADX (força da tendência)
-        if last["adx"] > 25:
-            indicators_list.append(f"✓ ADX: {last['adx']:.1f} - Tendência FORTE")
-            confidence += 2
-        else:
-            indicators_list.append(f"✓ ADX: {last['adx']:.1f} - Sem tendência clara")
-            confidence += 1
-
-        # 7. Volume
-        volume_avg = df["volume"].mean()
-        volume_increase = ((last["volume"] - volume_avg) / volume_avg * 100)
-        if last["volume"] > volume_avg * 1.5:
-            indicators_list.append(f"✓ Volume: +{volume_increase:.0f}% acima da média - Confirmação forte")
-            confidence += 2
-        else:
-            indicators_list.append(f"✓ Volume: {volume_increase:+.0f}% vs média")
-            confidence += 1
-
-        # 8. ATR (volatilidade)
-        indicators_list.append(f"✓ ATR: {last['atr']:.5f} - Volatilidade {'alta' if last['atr'] > df['atr'].mean() else 'normal'}")
-        confidence += 1
-
-        # Definir sinal baseado na maioria dos indicadores
-        if bullish_signals > bearish_signals:
-            signal = "CALL"
-            signal_strength_raw = bullish_signals / (bullish_signals + bearish_signals) * 100 if (bullish_signals + bearish_signals) > 0 else 50
-        elif bearish_signals > bullish_signals:
-            signal = "PUT"
-            signal_strength_raw = bearish_signals / (bullish_signals + bearish_signals) * 100 if (bullish_signals + bearish_signals) > 0 else 50
-        else:
-            signal = "WAIT"
-            signal_strength_raw = 50
-
-        # Ajustar confiança baseado na força do sinal
-        confidence = min(confidence + (signal_strength_raw - 50) / 2, 99)
-        confidence = max(confidence, 90)
-
-        print(f"📊 Sinal: {signal} | Confiança: {confidence:.2f}% | Bullish: {bullish_signals} | Bearish: {bearish_signals}")
-
-        result = {
-            "symbol": symbol,
-            "broker": broker,
-            "market": market,
-            "signal": signal,
-            "confidence": round(confidence, 2),
-            "indicators": indicators_list,
-            "entry_price": round(last["close"], 5),
-            "indicators_values": {
-                "rsi": round(last["rsi"], 2),
-                "ema_fast": round(last["ema_fast"], 5),
-                "ema_slow": round(last["ema_slow"], 5),
-                "macd": round(last["macd"], 5),
-                "macd_signal": round(last["macd_signal"], 5),
-                "stochastic": round(last["stochastic"], 2),
-                "adx": round(last["adx"], 2),
-                "atr": round(last["atr"], 5),
-                "bb_high": round(last["bb_high"], 5),
-                "bb_low": round(last["bb_low"], 5)
-            },
-            "signal_strength": {
-                "bullish": round(bullish_signals, 1),
-                "bearish": round(bearish_signals, 1)
-            }
-        }
-
-        # Enviar para Telegram se bot estiver ativo
-        if BOT_ACTIVE and TELEGRAM_BOT_TOKEN and signal != "WAIT":
-            await enviar_sinal_telegram(result)
-
-        return result
-
-    except HTTPException as he:
-        raise he
+        df = _fetch_series_from_twelvedata(td_symbol, td_interval, outputsize=500)
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"❌ Erro interno: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
+        raise HTTPException(status_code=502, detail=f"Falha ao buscar dados: {str(e)}")
 
-# ======================================================
-# 🤖 ENVIO AUTOMÁTICO PARA TELEGRAM
-# ======================================================
-
-async def enviar_sinal_telegram(dados):
     try:
-        indicadores_text = "\n".join([f"{ind}" for ind in dados["indicators"][:6]])
+        df = compute_indicators(df)
+        decision = confluence_engine(df)
+        last = len(df) - 1
+        last_price = float(df["close"].iloc[last])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro na análise: {str(e)}")
 
-        emoji_sinal = "📈" if dados['signal'] == "CALL" else "📉"
+    result = {
+        "broker": broker,
+        "symbol": symbol,
+        "timeframe": tf,
+        "market": payload.market,
+        "last_price": last_price,
+        "signal": decision["signal"],
+        "confidence": decision["confidence"],
+        "reasons": decision["reasons"],
+        "indicators": {
+            "rsi": round(float(df["rsi"].iloc[-1]), 2),
+            "ema9": round(float(df["ema9"].iloc[-1]), 5),
+            "ema21": round(float(df["ema21"].iloc[-1]), 5),
+            "sma50": round(float(df["sma50"].iloc[-1]) if not np.isnan(df["sma50"].iloc[-1]) else float("nan"), 5),
+            "sma200": round(float(df["sma200"].iloc[-1]) if not np.isnan(df["sma200"].iloc[-1]) else float("nan"), 5),
+            "macd": round(float(df["macd"].iloc[-1]), 5),
+            "stoch": round(float(df["stoch"].iloc[-1]), 2),
+            "adx": round(float(df["adx"].iloc[-1]), 2),
+            "atr": round(float(df["atr"].iloc[-1]), 5),
+            "bb_h": round(float(df["bb_h"].iloc[-1]), 5),
+            "bb_l": round(float(df["bb_l"].iloc[-1]), 5),
+            "cci": round(float(df["cci"].iloc[-1]), 2),
+            "wr": round(float(df["wr"].iloc[-1]), 2),
+            "mfi": round(float(df["mfi"].iloc[-1]), 2),
+            "roc": round(float(df["roc"].iloc[-1]), 2),
+        }
+    }
 
+    # envio opcional ao Telegram
+    if payload.auto and BOT_AUTO and decision["signal"] in ("CALL", "PUT"):
         msg = (
-            f"{emoji_sinal} *SINAL IA IMPERADORVIP 4.0*\n\n"
-            f"💱 *Ativo:* {dados['symbol']}\n"
-            f"🏦 *Corretora:* {dados['broker']}\n"
-            f"🕒 *Mercado:* {dados['market']}\n\n"
-            f"🎯 *SINAL:* *{dados['signal']}*\n"
-            f"🔥 *Confiança:* *{dados['confidence']}%*\n"
-            f"💰 *Entrada:* {dados['entry_price']}\n\n"
-            f"📊 *Análise Técnica:*\n{indicadores_text}\n\n"
-            f"⚡ Bullish: {dados['signal_strength']['bullish']} | Bearish: {dados['signal_strength']['bearish']}\n\n"
-            f"#imperadorvip #sinal{dados['signal'].lower()}"
+            f"⚡ <b>ImperadorVIP - Sinal</b>\n"
+            f"Corretora: <b>{broker}</b>\n"
+            f"Ativo: <b>{symbol}</b>\n"
+            f"Timeframe: <b>{tf}</b>\n"
+            f"Sinal: <b>{decision['signal']}</b>\n"
+            f"Confiança: <b>{decision['confidence']}%</b>\n"
+            f"Preço: <b>{last_price}</b>"
         )
+        _tg_send(msg)
 
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": msg,
-            "parse_mode": "Markdown"
-        }
-        response = requests.post(url, json=payload, timeout=5)
+    return result
 
-        if response.ok:
-            print(f"✅ Sinal enviado para Telegram: {dados['symbol']} - {dados['signal']}")
-        else:
-            print(f"❌ Erro ao enviar para Telegram: {response.text}")
-
-    except Exception as e:
-        print(f"❌ Erro ao enviar sinal para Telegram: {e}")
-
-# ======================================================
-# 🔄 CONTROLE DO BOT
-# ======================================================
-
-@app.post("/bot/toggle")
-async def toggle_bot():
-    global BOT_ACTIVE
-    BOT_ACTIVE = not BOT_ACTIVE
-    status = "ativado ✅" if BOT_ACTIVE else "desativado ⚪"
-    print(f"🤖 Bot {status}")
-    return {"status": f"Bot {status}", "bot_active": BOT_ACTIVE}
-
+# -----------------------------
+# Bot Telegram - controle
+# -----------------------------
 @app.get("/bot/status")
-async def bot_status():
-    return {"bot_active": BOT_ACTIVE}
+def bot_status():
+    return {"enabled": BOT_AUTO, "has_token": bool(TG_TOKEN), "chat": TG_CHAT or "(não configurado)"}
+
+@app.post("/bot/enable")
+def bot_enable():
+    global BOT_AUTO
+    if not TG_TOKEN or not TG_CHAT:
+        raise HTTPException(status_code=400, detail="Configure TELEGRAM_BOT_TOKEN e TELEGRAM_CHAT_ID.")
+    BOT_AUTO = True
+    return {"enabled": BOT_AUTO}
+
+@app.post("/bot/disable")
+def bot_disable():
+    global BOT_AUTO
+    BOT_AUTO = False
+    return {"enabled": BOT_AUTO}
 
 # ======================================================
-# 🧩 EXECUÇÃO
+# 🧩 Execução local
 # ======================================================
-@app.get("/ping")
-def ping():
-    return {"status": "pong", "message": "Servidor ativo e pronto!"}
-
 if __name__ == "__main__":
     import uvicorn
-    print("="*50)
-    print("🚀 ImperadorVIP IA 4.0 - Iniciando...")
-    print(f"📡 Porta: {PORT}")
-    print(f"🔑 TwelveData: {'Configurado ✅' if TWELVEDATA_KEY and TWELVEDATA_KEY != 'demo' else 'NÃO configurado ❌'}")
-    print(f"🤖 Telegram: {'Configurado ✅' if TELEGRAM_BOT_TOKEN else 'NÃO configurado ❌'}")
-    print("="*50)
     uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=True)
-
