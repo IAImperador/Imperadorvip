@@ -1,415 +1,582 @@
 # ======================================================
-# 🚀 IMPERADORVIP – Backend IA (Dados Reais + Sincronismo de Velas)
+# 🚀 IMPERADORVIP - IA Multi-Corretoras (Dados Reais + Telegram)
+# Fonte de preços: TwelveData | Envio auto: ≥ 90% de confiança
 # ======================================================
 
-from fastapi import FastAPI, HTTPException, Request, Query
+from fastapi import FastAPI, HTTPException, Request, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Dict, List, Optional
-import os, math, time, datetime as dt
+from typing import Dict, List, Optional, Any
+import os
 import requests
 import pandas as pd
 import numpy as np
+import math
+from datetime import datetime, timezone
 
-# ---------- Configs ----------
+# -----------------------------
+# Configurações e Variáveis
+# -----------------------------
+
 APP_NAME = os.getenv("APP_NAME", "ImperadorVIP")
 PORT = int(os.getenv("PORT", "8080"))
-TIMEZONE = os.getenv("TIMEZONE", "America/Sao_Paulo")
 API_KEY = os.getenv("API_KEY", "imperadorvip-secure-key-2025")
 
-# Providers
-TWELVEDATA_KEY = os.getenv("TWELVEDATA_KEY", "demo")  # pegue sua key real
-HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "12"))
+# TwelveData
+TWELVEDATA_KEY = os.getenv("TWELVEDATA_KEY", "")
+TWELVEDATA_BASE = "https://api.twelvedata.com/time_series"
 
-# Telegram (opcional)
+# Telegram
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-TG_AUTO = os.getenv("TG_AUTO", "off").lower() == "on"
 
-# ---------- App & CORS ----------
-app = FastAPI(title="ImperadorVIP IA", version="4.2")
+# Modo automático (env ou default off)
+AUTO_MODE = os.getenv("AUTO_MODE", "false").lower() == "true"
+
+# Timeout HTTP
+HTTP_TIMEOUT = 12
+
+# -----------------------------
+# App + CORS
+# -----------------------------
+
+app = FastAPI(title=f"{APP_NAME} IA", version="4.0")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://imperadorvip.base44.app",
-        "https://studio.base44.io",
-        "https://app.base44.io",
-        "https://base44.app",
-        "*",
+        "*",  # Base44, seu domínio custom e testes
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ---------- Helpers ----------
-def now_utc():
-    return dt.datetime.now(dt.timezone.utc)
+# -----------------------------
+# Corretores suportados e ativos
+# (listas pragmáticas e realistas para validação/UX)
+# -----------------------------
 
-def to_tz(ts: dt.datetime, tz_name: str) -> dt.datetime:
-    # conversão sem libs extras: assumimos offset fixo via %z quando disponível
-    # para respostas, manteremos UTC e string ISO; borda de vela é calculada em UTC
-    return ts
+# Conjunto base de pares FX (TwelveData suporta os principais)
+FX_BASE = [
+    "EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "NZD/USD",
+    "USD/CAD", "EUR/GBP", "EUR/JPY", "GBP/JPY", "EUR/CHF",
+    "USD/BRL", "USD/MXN", "EUR/BRL"  # pares latam
+]
 
-FRAME_MINUTES = {"M1":1, "M5":5, "M15":15, "M30":30, "H1":60}
+CRYPTO_BASE = [
+    "BTC/USD", "ETH/USD", "SOL/USD", "BNB/USD", "XRP/USD", "DOGE/USD"
+]
 
-def floor_to_frame(ts_utc: dt.datetime, frame: str) -> dt.datetime:
-    minutes = FRAME_MINUTES.get(frame.upper(), 1)
-    floored_minute = (ts_utc.minute // minutes) * minutes
-    return ts_utc.replace(second=0, microsecond=0, minute=floored_minute)
+INDICES_BASE = [
+    "US500", "NAS100", "US30", "DE40", "UK100", "JP225"
+]
 
-def normalize_symbol(broker: str, symbol: str) -> Dict[str, str]:
-    """
-    Converte 'USD/BRL' -> {'fx':'USDBRL', 'binance':'USDTBRL', 'pretty':'USD/BRL'}
-    Converte 'BTC/USDT' -> {'fx':'BTCUSD', 'binance':'BTCUSDT', ...}
-    """
-    s = symbol.upper().replace(" ", "")
-    pretty = s.replace("/", "/")
-    parts = s.split("/")
-    out = {"pretty": symbol}
-
-    if len(parts) == 2:
-        base, quote = parts[0], parts[1]
-        out["fx"] = f"{base}{quote}"        # TwelveData/FX style
-        if quote in ("USDT","BUSD"):
-            out["binance"] = f"{base}{quote}"  # Binance cripto
-        elif base in ("XAU","XAG"):  # Ouro/Prata
-            out["fx"] = f"{base}{quote}"
-            out["binance"] = None
-        else:
-            # mapeia pares BRL para USDTBRL em cripto (aproximação)
-            if quote == "BRL":
-                out["binance"] = f"USDT{quote}" if base=="USDT" else f"{base}{quote}"
-            else:
-                out["binance"] = f"{base}{quote}"
-
-    else:
-        # símbolos “índices” (ex.: US500, NAS100) – suporte TwelveData
-        out["fx"] = s
-        out["binance"] = None
-
-    # Ajustes por corretora (nomes exibidos)
-    out["pretty"] = symbol
-    return out
-
-def is_otc(market: str) -> bool:
-    return market.strip().upper() == "OTC"
-
-# ---------- Universos por corretora ----------
-BROKERS: Dict[str, Dict] = {
+# Mapeamento simplificado por corretora
+BROKER_UNIVERSE: Dict[str, Dict[str, List[str]]] = {
     "Quotex": {
-        "markets": ["BINARIAS","DIGITAL","OTC","CRYPTO","FOREX","INDICES"],
-        "notes": "Preços OTC são sintéticos; feed público não é 1:1.",
-        "assets_hint": ["EUR/USD","USD/BRL","GBP/JPY","XAU/USD","BTC/USDT"],
+        "forex": FX_BASE,
+        "crypto": CRYPTO_BASE,
+        "indices": INDICES_BASE,
+        "binary_types": ["OTC", "Aberto"],  # rótulos de UI
     },
     "IQ Option": {
-        "markets": ["BINARIAS","DIGITAL","OTC","FOREX","CRYPTO","INDICES"],
-        "assets_hint": ["EUR/USD","GBP/USD","USD/JPY","BTC/USDT","XAU/USD"],
-    },
-    "Binomo": {
-        "markets": ["BINARIAS","OTC"],
-        "assets_hint": ["EUR/USD","USD/JPY","GBP/USD"],
-    },
-    "Pocket Option": {
-        "markets": ["BINARIAS","OTC","CRYPTO"],
-        "assets_hint": ["EUR/USD","USD/BRL","BTC/USDT"],
-    },
-    "Olymp Trade": {
-        "markets": ["BINARIAS","OTC","FOREX","CRYPTO"],
-        "assets_hint": ["EUR/USD","USD/JPY","BTC/USDT"],
+        "forex": FX_BASE,
+        "crypto": CRYPTO_BASE,
+        "indices": INDICES_BASE,
+        "binary_types": ["Digital", "Binárias"],
     },
     "Deriv": {
-        "markets": ["BINARY","FOREX","CRYPTO","SYNTHETIC"],
-        "assets_hint": ["EUR/USD","Volatility 100 (synthetic)","BTC/USDT"],
-        "api": "oficial"  # tem WebSocket oficial (não implementado aqui)
+        "forex": FX_BASE,
+        "crypto": CRYPTO_BASE,
+        "indices": INDICES_BASE,
+        "binary_types": ["Volatility", "Synthetic"],
     },
-    "Avalon":{"markets":["BINARIAS"],"assets_hint":[]},
-    "BulleX":{"markets":["BINARIAS"],"assets_hint":[]},
-    "Casa Trader":{"markets":["BINARIAS"],"assets_hint":[]},
-    "NexBroker":{"markets":["BINARIAS"],"assets_hint":[]},
-    "Polaryum":{"markets":["BINARIAS"],"assets_hint":[]},
-    "Broker10":{"markets":["BINARIAS"],"assets_hint":[]},
+    "Olymp Trade": {
+        "forex": FX_BASE,
+        "crypto": CRYPTO_BASE[:4],
+        "indices": INDICES_BASE[:4],
+        "binary_types": ["Tempo Fixo"],
+    },
+    "Binomo": {
+        "forex": FX_BASE,
+        "crypto": CRYPTO_BASE[:4],
+        "indices": INDICES_BASE[:4],
+        "binary_types": ["Tempo Fixo"],
+    },
+    "Avalon": {
+        "forex": FX_BASE[:10],
+        "crypto": CRYPTO_BASE[:4],
+        "indices": INDICES_BASE[:3],
+        "binary_types": ["OTC", "Aberto"],
+    },
+    "BulleX": {
+        "forex": FX_BASE[:10],
+        "crypto": CRYPTO_BASE[:4],
+        "indices": INDICES_BASE[:3],
+        "binary_types": ["OTC", "Aberto"],
+    },
+    "Casa Trader": {
+        "forex": FX_BASE[:10],
+        "crypto": CRYPTO_BASE[:4],
+        "indices": INDICES_BASE[:3],
+        "binary_types": ["OTC", "Aberto"],
+    },
+    "NexBroker": {
+        "forex": FX_BASE[:10],
+        "crypto": CRYPTO_BASE[:4],
+        "indices": INDICES_BASE[:3],
+        "binary_types": ["OTC", "Aberto"],
+    },
+    "Polaryum": {   # conforme você pediu a grafia
+        "forex": FX_BASE,
+        "crypto": CRYPTO_BASE,
+        "indices": INDICES_BASE,
+        "binary_types": ["OTC", "Aberto"],
+    },
+    "Broker10": {
+        "forex": FX_BASE[:10],
+        "crypto": CRYPTO_BASE[:3],
+        "indices": INDICES_BASE[:3],
+        "binary_types": ["OTC", "Aberto"],
+    },
 }
 
-ALL_BROKERS = list(BROKERS.keys())
+BROKERS_SUPPORTED = list(BROKER_UNIVERSE.keys())
 
-# ---------- Price Providers ----------
-def td_price_fx(symbol_fx: str) -> Optional[float]:
-    # preço spot atual
-    try:
-        url = f"https://api.twelvedata.com/price?symbol={symbol_fx}&apikey={TWELVEDATA_KEY}"
-        r = requests.get(url, timeout=HTTP_TIMEOUT)
-        j = r.json()
-        if "price" in j:
-            return float(j["price"])
-    except Exception:
-        return None
-    return None
+# -----------------------------
+# Helpers: intervals & símbolos
+# -----------------------------
 
-def td_candles(symbol_fx: str, interval: str="1min", outputsize: int=150) -> pd.DataFrame:
-    url = (
-        "https://api.twelvedata.com/time_series"
-        f"?symbol={symbol_fx}&interval={interval}&outputsize={outputsize}&apikey={TWELVEDATA_KEY}"
+INTERVAL_MAP = {
+    "M1": "1min", "1m": "1min", "1min": "1min",
+    "M5": "5min", "5m": "5min",
+    "M15": "15min", "15m": "15min",
+    "M30": "30min", "30m": "30min",
+    "H1": "1h", "1h": "1h",
+}
+
+def to_td_symbol(symbol: str) -> List[str]:
+    """
+    Normaliza o símbolo para a TwelveData.
+    Tenta variações: "EUR/USD" -> ["EUR/USD", "EURUSD"]
+    Índices como "US500" mantêm-se.
+    Cripto idem.
+    """
+    s = symbol.strip().upper().replace(" ", "")
+    candidates = [s]
+    if "/" in s:
+        candidates.append(s.replace("/", ""))
+    return candidates
+
+def http_get_json(url: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    r = requests.get(url, params=params, timeout=HTTP_TIMEOUT)
+    r.raise_for_status()
+    return r.json()
+
+def fetch_twelvedata(symbol: str, interval: str, outputsize: int = 150) -> pd.DataFrame:
+    """
+    Busca candles na TwelveData tentando variações do símbolo.
+    Retorna DataFrame com colunas: open, high, low, close
+    """
+    if not TWELVEDATA_KEY:
+        raise HTTPException(status_code=400, detail="TWELVEDATA_KEY não configurada.")
+    td_interval = INTERVAL_MAP.get(interval, "1min")
+    errors: List[str] = []
+
+    for candidate in to_td_symbol(symbol):
+        try:
+            data = http_get_json(TWELVEDATA_BASE, {
+                "symbol": candidate,
+                "interval": td_interval,
+                "apikey": TWELVEDATA_KEY,
+                "outputsize": str(outputsize),
+                "order": "desc",
+            })
+            if "values" in data:
+                df = pd.DataFrame(data["values"])
+                df = df.rename(columns=str.lower)
+                # garantir tipos
+                for col in ["open", "high", "low", "close"]:
+                    df[col] = df[col].astype(float)
+                # ordenar por tempo (asc)
+                df = df.iloc[::-1].reset_index(drop=True)
+                return df
+            else:
+                errors.append(f"{candidate}: resposta sem 'values' ({data.get('message') or data})")
+        except Exception as ex:
+            errors.append(f"{candidate}: {ex}")
+
+    raise HTTPException(
+        status_code=400,
+        detail=f"TwelveData sem dados para {symbol} ({interval}). Tentativas: {errors}"
     )
-    r = requests.get(url, timeout=HTTP_TIMEOUT)
-    j = r.json()
-    if "values" not in j:
-        raise HTTPException(status_code=400, detail=f"TwelveData sem 'values' para {symbol_fx}: {j.get('message','erro')}")
-    df = pd.DataFrame(j["values"])
-    for col in ("open","high","low","close"):
-        df[col] = df[col].astype(float)
-    # TwelveData vem desc, ordene asc por datetime
-    df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
-    df = df.sort_values("datetime").reset_index(drop=True)
+
+# -----------------------------
+# Indicadores e Padrões de Vela
+# -----------------------------
+
+def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """Adiciona RSI, EMAs, MACD, Bollinger e Stoch."""
+    close = df["close"]
+    high = df["high"]
+    low = df["low"]
+
+    # RSI
+    rsi_period = 14
+    delta = close.diff()
+    up = delta.clip(lower=0)
+    down = -1 * delta.clip(upper=0)
+    ma_up = up.ewm(com=rsi_period-1, adjust=False).mean()
+    ma_down = down.ewm(com=rsi_period-1, adjust=False).mean()
+    rs = ma_up / (ma_down + 1e-9)
+    df["rsi"] = 100 - (100 / (1 + rs))
+
+    # EMA 9/21
+    df["ema_fast"] = close.ewm(span=9, adjust=False).mean()
+    df["ema_slow"] = close.ewm(span=21, adjust=False).mean()
+
+    # MACD clássico 12/26/9
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    macd_line = ema12 - ema26
+    signal = macd_line.ewm(span=9, adjust=False).mean()
+    df["macd"] = macd_line
+    df["macd_signal"] = signal
+    df["macd_hist"] = macd_line - signal
+
+    # Bollinger (20, 2)
+    ma20 = close.rolling(20).mean()
+    std20 = close.rolling(20).std()
+    df["bb_mid"] = ma20
+    df["bb_up"] = ma20 + 2 * std20
+    df["bb_low"] = ma20 - 2 * std20
+    # largura
+    df["bb_width"] = (df["bb_up"] - df["bb_low"]) / (df["bb_mid"] + 1e-9)
+
+    # Stochastic %K (14), %D (3)
+    low14 = low.rolling(14).min()
+    high14 = high.rolling(14).max()
+    df["stoch_k"] = (close - low14) / (high14 - low14 + 1e-9) * 100
+    df["stoch_d"] = df["stoch_k"].rolling(3).mean()
+
     return df
 
-def binance_price(symbol_binance: str) -> Optional[float]:
-    try:
-        url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol_binance}"
-        r = requests.get(url, timeout=HTTP_TIMEOUT)
-        j = r.json()
-        if "price" in j:
-            return float(j["price"])
-    except Exception:
-        return None
-    return None
+def candle_patterns(df: pd.DataFrame) -> Dict[str, bool]:
+    """Detecta alguns padrões fortes de reversão/continuação."""
+    if len(df) < 3:
+        return {"engulfing_bull": False, "engulfing_bear": False,
+                "hammer": False, "shooting_star": False}
 
-def binance_klines(symbol_binance: str, interval: str="1m", limit: int=300) -> pd.DataFrame:
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol_binance}&interval={interval}&limit={limit}"
-    r = requests.get(url, timeout=HTTP_TIMEOUT)
-    arr = r.json()
-    if isinstance(arr, list):
-        cols = ["open_time","open","high","low","close","volume","close_time",
-                "qav","num_trades","taker_base","taker_quote","ignore"]
-        df = pd.DataFrame(arr, columns=cols)
-        for c in ("open","high","low","close"):
-            df[c] = df[c].astype(float)
-        df["datetime"] = pd.to_datetime(df["close_time"], unit="ms", utc=True)
-        df = df[["datetime","open","high","low","close"]].sort_values("datetime").reset_index(drop=True)
-        return df
-    raise HTTPException(status_code=400, detail=f"Binance klines inválidos: {arr}")
+    c1 = df.iloc[-1]
+    c0 = df.iloc[-2]
 
-def pick_feed(broker: str, symbol: str, market: str):
-    """Decide fonte de preço/candle e indica qualidade."""
-    ns = normalize_symbol(broker, symbol)
-    fx = ns.get("fx")
-    b = ns.get("binance")
-    market_up = market.upper()
+    # Corpo e sombras
+    def candle_body(c): return abs(c["close"] - c["open"])
+    def upper_shadow(c): return c["high"] - max(c["close"], c["open"])
+    def lower_shadow(c): return min(c["close"], c["open"]) - c["low"]
 
-    # Cripto → Binance
-    if "BTC" in symbol.upper() or "ETH" in symbol.upper() or "USDT" in symbol.upper():
-        return {"price_fn": lambda: binance_price(b), "candles_fn": lambda i: binance_klines(b, interval=i), "quality":"real-crypto", "source":"binance"}
+    # Engolfo altista (corpo cobre o anterior e fecha acima)
+    engulf_bull = ( (c1["close"] > c1["open"]) and
+                    (c0["close"] < c0["open"]) and
+                    (min(c1["open"], c1["close"]) <= min(c0["open"], c0["close"])) and
+                    (max(c1["open"], c1["close"]) >= max(c0["open"], c0["close"])) )
 
-    # Forex/Metais/Índices → TwelveData
-    # (para Quotex/Binárias em OTC, marcamos como simulated)
-    quality = "real-fx"
-    if is_otc(market_up):
-        quality = "simulated-otc"
+    # Engolfo baixista
+    engulf_bear = ( (c1["close"] < c1["open"]) and
+                    (c0["close"] > c0["open"]) and
+                    (min(c1["open"], c1["close"]) <= min(c0["open"], c0["close"])) and
+                    (max(c1["open"], c1["close"]) >= max(c0["open"], c0["close"])) )
+
+    # Martelo (pin bar inferior)
+    body = candle_body(c1)
+    ls = lower_shadow(c1)
+    us = upper_shadow(c1)
+    hammer = (ls > body * 2.5) and (us < body) and (c1["close"] > c1["open"])
+
+    # Shooting Star (pin bar superior)
+    shooting = (us > body * 2.5) and (ls < body) and (c1["close"] < c1["open"])
+
     return {
-        "price_fn": lambda: td_price_fx(fx),
-        "candles_fn": lambda i: td_candles(fx, interval=i),
-        "quality": quality,
-        "source": "twelvedata"
+        "engulfing_bull": bool(engulf_bull),
+        "engulfing_bear": bool(engulf_bear),
+        "hammer": bool(hammer),
+        "shooting_star": bool(shooting),
     }
 
-def tf_to_provider_interval(tf: str, provider: str) -> str:
-    tf = tf.upper()
-    if provider == "binance":
-        return {"M1":"1m","M5":"5m","M15":"15m","M30":"30m","H1":"1h"}.get(tf,"1m")
-    # TwelveData
-    return {"M1":"1min","M5":"5min","M15":"15min","M30":"30min","H1":"1h"}.get(tf,"1min")
+# -----------------------------
+# Estratégia & Confluências
+# -----------------------------
 
-# ---------- Indicadores (essenciais e leves) ----------
-def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    # Calcula poucos indicadores leves e estáveis; (outros podem ser somados depois)
-    close = df["close"]
-    # EMA9 / EMA21
-    df["ema9"]  = close.ewm(span=9, adjust=False).mean()
-    df["ema21"] = close.ewm(span=21, adjust=False).mean()
-    # RSI14
-    delta = close.diff()
-    up = np.where(delta>0, delta, 0.0)
-    down = np.where(delta<0, -delta, 0.0)
-    roll_up = pd.Series(up).ewm(span=14, adjust=False).mean()
-    roll_down = pd.Series(down).ewm(span=14, adjust=False).mean()
-    rs = roll_up / (roll_down + 1e-9)
-    df["rsi14"] = 100 - (100/(1+rs))
-    # Bollinger 20
-    m = close.rolling(20).mean()
-    s = close.rolling(20).std(ddof=0)
-    df["bb_mid"] = m
-    df["bb_high"] = m + 2*s
-    df["bb_low"]  = m - 2*s
-    return df
-
-def make_signal(df: pd.DataFrame) -> Dict:
+def build_confluences(df: pd.DataFrame) -> Dict[str, Any]:
+    """Gera confluências e um sinal provável."""
     last = df.iloc[-1]
-    sig = "WAIT"
-    reasons = []
+    prev = df.iloc[-2] if len(df) >= 2 else last
 
-    if last["ema9"] > last["ema21"] and last["rsi14"] < 70:
-        sig = "CALL"
-        reasons.append("Tendência de alta (EMA9>EMA21) e RSI<70")
-    elif last["ema9"] < last["ema21"] and last["rsi14"] > 30:
-        sig = "PUT"
-        reasons.append("Tendência de baixa (EMA9<EMA21) e RSI>30")
+    confluences: List[str] = []
+    score = 0
 
-    # Bollinger squeeze breakout (simples)
-    if last["close"] > last["bb_high"]:
-        sig = "CALL"; reasons.append("Fechou acima da banda superior (breakout)")
-    elif last["close"] < last["bb_low"]:
-        sig = "PUT"; reasons.append("Fechou abaixo da banda inferior (breakdown)")
+    # Tendência por EMAs
+    if last["ema_fast"] > last["ema_slow"]:
+        confluences.append("Tendência de alta (EMA 9>21)")
+        score += 2
+    elif last["ema_fast"] < last["ema_slow"]:
+        confluences.append("Tendência de baixa (EMA 9<21)")
+        score += 2
 
-    # confiança heurística (faixa 88-99)
-    conf = 92.0
-    if "breakout" in " ".join(reasons).lower():
-        conf = 96.0
-    return {"signal": sig, "confidence": round(conf,2), "reasons": reasons}
+    # RSI
+    if last["rsi"] < 30:
+        confluences.append(f"RSI {last['rsi']:.1f} (sobrevendido)")
+        score += 2
+    elif last["rsi"] > 70:
+        confluences.append(f"RSI {last['rsi']:.1f} (sobrecomprado)")
+        score += 2
 
-# ---------- Telegram ----------
-def tg_send(text: str):
-    if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
+    # MACD histograma
+    if last["macd_hist"] > 0 and prev["macd_hist"] <= 0:
+        confluences.append("Cruzamento MACD para alta")
+        score += 2
+    elif last["macd_hist"] < 0 and prev["macd_hist"] >= 0:
+        confluences.append("Cruzamento MACD para baixa")
+        score += 2
+
+    # Bollinger - contração / expansão
+    if pd.notna(last["bb_width"]):
+        if last["bb_width"] < df["bb_width"].rolling(20).mean().iloc[-1] * 0.8:
+            confluences.append("Bollinger: contração (breakout possível)")
+            score += 1
+
+    # Estocástico
+    if (last["stoch_k"] < 20) and (last["stoch_d"] < 20):
+        confluences.append("Stoch em zona de compra (reversão provável)")
+        score += 1
+    elif (last["stoch_k"] > 80) and (last["stoch_d"] > 80):
+        confluences.append("Stoch em zona de venda (reversão provável)")
+        score += 1
+
+    # Padrões de vela
+    pats = candle_patterns(df)
+    if pats["engulfing_bull"]:
+        confluences.append("Padrão: Engolfo de Alta")
+        score += 2
+    if pats["engulfing_bear"]:
+        confluences.append("Padrão: Engolfo de Baixa")
+        score += 2
+    if pats["hammer"]:
+        confluences.append("Padrão: Martelo (Pin Bar)")
+        score += 1
+    if pats["shooting_star"]:
+        confluences.append("Padrão: Shooting Star (Pin Bar)")
+        score += 1
+
+    # Derivação do sinal
+    # Base: EMAs + RSI priorizam direção
+    signal = "WAIT"
+    if last["ema_fast"] > last["ema_slow"] and last["rsi"] < 70:
+        signal = "CALL"
+    if last["ema_fast"] < last["ema_slow"] and last["rsi"] > 30:
+        signal = "PUT"
+
+    # Ajustes por padrões fortes
+    if pats["engulfing_bull"]:
+        signal = "CALL"
+    if pats["engulfing_bear"]:
+        signal = "PUT"
+
+    # Confiança: mapeia score (0..~12) para % 80..99
+    # e penaliza se MACD e EMAs divergem
+    base_conf = min(99.0, 80.0 + score * 1.8)
+    if ( (last["ema_fast"] > last["ema_slow"] and last["macd_hist"] < 0) or
+         (last["ema_fast"] < last["ema_slow"] and last["macd_hist"] > 0) ):
+        base_conf -= 3.5
+
+    confidence = max(50.0, min(99.0, base_conf))
+
+    return {
+        "signal": signal,
+        "confidence": round(confidence, 2),
+        "confluences": confluences,
+        "patterns": pats
+    }
+
+# -----------------------------
+# Telegram
+# -----------------------------
+
+def send_telegram(text: str) -> None:
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True
+        }
         requests.post(url, json=payload, timeout=HTTP_TIMEOUT)
     except Exception:
+        # não falha o fluxo por erro no telegram
         pass
 
-# ======================================================
-# 🌐 Endpoints
-# ======================================================
+# -----------------------------
+# Middlewares simples
+# -----------------------------
+
+def require_api_key(x_api_key: Optional[str]):
+    if API_KEY and x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="API key inválida.")
+
+def validate_broker_symbol(broker: str, symbol: str) -> None:
+    if broker not in BROKER_UNIVERSE:
+        raise HTTPException(status_code=400, detail=f"Corretora não suportada: {broker}")
+
+    universe = BROKER_UNIVERSE[broker]
+    all_symbols = set(universe["forex"]) | set(universe["crypto"]) | set(universe["indices"])
+    if symbol.upper() not in {s.upper() for s in all_symbols}:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Ativo '{symbol}' não disponível em {broker}. Consulte /assets?broker={broker}."
+        )
+
+# -----------------------------
+# Endpoints
+# -----------------------------
 
 @app.get("/")
 def root():
     return {
-        "status":"online",
+        "status": "online",
         "app": APP_NAME,
-        "brokers_enabled": ALL_BROKERS,
-        "message": f"{APP_NAME} pronto.",
+        "brokers_supported": BROKERS_SUPPORTED,
+        "auto_mode": AUTO_MODE,
+        "message": f"IA {APP_NAME} com dados reais (TwelveData) pronta."
     }
 
 @app.get("/health")
+@app.get("/_health")
 def health():
-    return {"status":"healthy","time": now_utc().isoformat()}
+    return {"status": "healthy", "brokers_count": len(BROKERS_SUPPORTED)}
 
-@app.get("/brokers")
-def brokers():
-    return {"brokers": ALL_BROKERS}
+@app.get("/config")
+def config():
+    return {
+        "td_configured": bool(TWELVEDATA_KEY),
+        "tg_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
+        "auto_mode": AUTO_MODE,
+        "http_timeout": HTTP_TIMEOUT
+    }
 
 @app.get("/assets")
-def assets(broker: str = Query(..., description="Ex.: Quotex")):
-    if broker not in BROKERS:
-        raise HTTPException(400, f"Broker desconhecido: {broker}")
+def list_assets(broker: str = Query(..., description="Nome da corretora")):
+    if broker not in BROKER_UNIVERSE:
+        raise HTTPException(status_code=400, detail="Corretora não suportada.")
+    u = BROKER_UNIVERSE[broker]
     return {
         "broker": broker,
-        "markets": BROKERS[broker]["markets"],
-        "sample_assets": BROKERS[broker]["assets_hint"],
-        "note": BROKERS[broker].get("notes","")
+        "types": u["binary_types"],
+        "forex": u["forex"],
+        "crypto": u["crypto"],
+        "indices": u["indices"]
     }
 
-@app.get("/price")
-def price(
-    symbol: str = Query(..., description="Ex.: USD/BRL, EUR/USD, BTC/USDT"),
-    broker: str = Query("Quotex"),
-    market: str = Query("OTC")
-):
-    if broker not in BROKERS:
-        raise HTTPException(400, f"Broker desconhecido: {broker}")
+@app.post("/bot/enable")
+def bot_enable(x_api_key: Optional[str] = Header(None)):
+    global AUTO_MODE
+    require_api_key(x_api_key)
+    AUTO_MODE = True
+    return {"auto_mode": AUTO_MODE}
 
-    provider = pick_feed(broker, symbol, market)
-    price = provider["price_fn"]()
-    if price is None:
-        raise HTTPException(502, f"Falha ao obter preço para {symbol} ({provider['source']})")
-
-    return {
-        "symbol": symbol,
-        "broker": broker,
-        "market": market,
-        "price": price,
-        "price_source": provider["source"],
-        "data_quality": provider["quality"],
-        "timestamp": now_utc().isoformat()
-    }
+@app.post("/bot/disable")
+def bot_disable(x_api_key: Optional[str] = Header(None)):
+    global AUTO_MODE
+    require_api_key(x_api_key)
+    AUTO_MODE = False
+    return {"auto_mode": AUTO_MODE}
 
 @app.post("/analyze")
-async def analyze(request: Request):
+async def analyze(request: Request, x_api_key: Optional[str] = Header(None)):
+    """
+    Corpo esperado (JSON):
+    {
+      "broker": "Quotex",
+      "symbol": "USD/BRL",
+      "interval": "M1",          # M1, M5, M15, H1...
+      "market": "OTC",           # rótulo informativo
+      "expiry_minutes": 1        # opcional (1, 3, 5)
+    }
+    """
+    require_api_key(x_api_key)
+
     body = await request.json()
-    symbol = body.get("symbol", "EUR/USD")
-    broker = body.get("broker", "Quotex")
-    market = body.get("market", "OTC")
-    timeframe = body.get("timeframe", "M1").upper()
+    broker = (body.get("broker") or "").strip()
+    symbol = (body.get("symbol") or "").strip().upper()
+    interval = (body.get("interval") or "M1").strip()
+    expiry_minutes = int(body.get("expiry_minutes", 1))
+    market = (body.get("market") or "OTC").strip()
 
-    if broker not in BROKERS:
-        raise HTTPException(400, f"Broker desconhecido: {broker}")
+    if not broker or not symbol:
+        raise HTTPException(status_code=400, detail="Parâmetros obrigatórios: broker e symbol.")
 
-    provider = pick_feed(broker, symbol, market)
-    prov_name = provider["source"]
-    quality = provider["quality"]
+    # valida corretora/ativo
+    validate_broker_symbol(broker, symbol)
 
-    prov_interval = tf_to_provider_interval(timeframe, prov_name)
+    # busca candles
+    df = fetch_twelvedata(symbol, interval, outputsize=180)
+    if len(df) < 30:
+        raise HTTPException(status_code=400, detail="Série curta demais para análise.")
 
-    # candles
-    df = provider["candles_fn"](prov_interval)
-    if df.empty:
-        raise HTTPException(502, f"Sem candles para {symbol} em {prov_name}")
-
-    # alinhar à borda do timeframe (UTC)
-    now = now_utc()
-    edge = floor_to_frame(now, timeframe)
-    # garanta que última linha seja <= edge
-    df = df[df["datetime"] <= edge]
-    if df.empty:
-        raise HTTPException(502, "Sem vela fechada na borda do timeframe.")
-    # últimos N
-    df = df.tail(200).reset_index(drop=True)
-
-    # indicadores
+    # indicadores e confluências
     df = compute_indicators(df)
-    sig = make_signal(df)
+    evald = build_confluences(df)
+    signal = evald["signal"]
+    confidence = evald["confidence"]
+    confluences = evald["confluences"]
+    patterns = evald["patterns"]
+    last = df.iloc[-1]
 
-    # preço atual (tick)
-    last_price = provider["price_fn"]()
-    if last_price is None:
-        # usa último close se não houver tick
-        last_price = float(df.iloc[-1]["close"])
+    # Alvos (TP/SL) baseados na volatilidade recente (ATR simplificado)
+    atr_like = (df["high"] - df["low"]).rolling(14).mean().iloc[-1]
+    entry = float(last["close"])
+    take_profit = entry + (atr_like * 0.8 if signal == "CALL" else -atr_like * 0.8)
+    stop_loss   = entry - (atr_like * 0.8 if signal == "CALL" else -atr_like * 0.8)
 
-    resp = {
-        "symbol": symbol,
+    payload = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "broker": broker,
+        "symbol": symbol,
+        "interval": interval,
         "market": market,
-        "timeframe": timeframe,
-        "price_source": prov_name,
-        "data_quality": quality,
-        "frame_edge_utc": edge.isoformat(),
-        "last_close": float(df.iloc[-1]["close"]),
-        "last_price": float(last_price),
-        "indicators": {
-            "ema9": round(float(df.iloc[-1]["ema9"]), 6),
-            "ema21": round(float(df.iloc[-1]["ema21"]), 6),
-            "rsi14": round(float(df.iloc[-1]["rsi14"]), 2),
-            "bb_low": round(float(df.iloc[-1]["bb_low"]), 6),
-            "bb_high": round(float(df.iloc[-1]["bb_high"]), 6),
-        },
-        "signal": sig["signal"],
-        "confidence": sig["confidence"],
-        "reasons": sig["reasons"]
+        "expiry_minutes": expiry_minutes,
+        "last_price": round(entry, 6),
+        "signal": signal,
+        "confidence": confidence,
+        "take_profit": round(take_profit, 6),
+        "stop_loss": round(stop_loss, 6),
+        "confluences": confluences,
+        "patterns": patterns,
+        "source": "TwelveData",
     }
 
-    # Telegram (opcional/manual controlado por TG_AUTO)
-    if TG_AUTO and resp["signal"] in ("CALL","PUT"):
-        tg_send(
-            f"📈 {APP_NAME}\n"
-            f"Broker: {broker} ({market})\nPar: {symbol}\nTF: {timeframe}\n"
-            f"Sinal: {resp['signal']} ({resp['confidence']}%)\n"
-            f"Preço: {resp['last_price']} | Fonte: {prov_name} ({quality})\n"
-            f"Borda: {resp['frame_edge_utc']}"
+    # Envio automático para Telegram somente se ≥ 90%
+    if AUTO_MODE and confidence >= 90.0 and signal in ("CALL", "PUT"):
+        msg = (
+            f"📣 <b>{APP_NAME} • Sinal {signal}</b>\n"
+            f"• Corretora: <b>{broker}</b>\n"
+            f"• Ativo: <b>{symbol}</b>  • TF: <b>{interval}</b>  • Mercado: <b>{market}</b>\n"
+            f"• Expiração: <b>{expiry_minutes}m</b>\n"
+            f"• Preço: <code>{payload['last_price']}</code>\n"
+            f"• Confiança: <b>{confidence:.2f}%</b>\n"
+            f"• Confluências: {', '.join(confluences[:4])}...\n"
+            f"• TP: <code>{payload['take_profit']}</code> • SL: <code>{payload['stop_loss']}</code>\n"
+            f"⏱ {payload['timestamp']}"
         )
+        send_telegram(msg)
 
-    return resp
+    return payload
 
-# ---------- Execução local ----------
+# -----------------------------
+# Execução local
+# -----------------------------
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=True)
