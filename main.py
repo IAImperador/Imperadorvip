@@ -335,6 +335,9 @@ async def bot_status():
 # ======================================================
 # 🧩 EXECUÇÃO
 # ======================================================
+@app.get("/ping")
+def ping():
+    return {"status": "pong", "message": "Servidor ativo e pronto!"}
 
 if __name__ == "__main__":
     import uvicorn
@@ -345,3 +348,4 @@ if __name__ == "__main__":
     print(f"🤖 Telegram: {'Configurado ✅' if TELEGRAM_BOT_TOKEN else 'NÃO configurado ❌'}")
     print("="*50)
     uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=True)
+
