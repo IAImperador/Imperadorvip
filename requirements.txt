@@ -3,4 +3,5 @@ uvicorn
 requests
 pandas
 ta
-python-multipart
+python-dotenv
+aiohttp
