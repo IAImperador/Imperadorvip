@@ -2,133 +2,152 @@ import React, { useState } from "react";
 import axios from "axios";
 
 export default function RailwayConfig() {
+  const [apiBase, setApiBase] = useState("https://imperadorvip-production.up.railway.app");
+  const [apiKey, setApiKey] = useState("imperadorvip-secure-key-2025");
+
   const [telegramToken, setTelegramToken] = useState("");
   const [chatId, setChatId] = useState("");
+
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
-  // URL do seu backend
-  const API_BASE_URL = "https://imperadorvip-production.up.railway.app";
+  // ---------- Helpers ----------
+  const h = axios.create({
+    baseURL: apiBase.replace(/\/+$/, ""),
+    timeout: 20000,
+  });
 
-  // ================================
-  // SALVAR CONFIGURAÇÃO
-  // ================================
-  const handleSave = async () => {
+  const authHeaders = { "x-api-key": apiKey };
+
+  const showErr = (prefix, err) => {
+    const detail = err?.response?.data?.detail ?? err?.message ?? String(err);
+    setError(`${prefix}: ${detail}`);
+  };
+
+  // ---------- Testar conexão ----------
+  const handleTest = async () => {
+    setError(""); setMessage(""); setLoading(true);
     try {
-      setLoading(true);
-      setError("");
-      setMessage("");
+      const r = await h.get("/health");
+      if (r?.data?.ok) setMessage("✅ Conectado ao backend!");
+      else setError("⚠️ Backend respondeu, mas sem ok=true.");
+    } catch (e) {
+      showErr("❌ Erro de conexão", e);
+    } finally {
+      setLoading(false);
+    }
+  };
 
+  // ---------- Salvar config bot ----------
+  const handleSave = async () => {
+    setError(""); setMessage(""); setLoading(true);
+    try {
       const payload = {
         telegram_token: telegramToken || null,
         chat_id: chatId || null,
       };
-
-      const response = await axios.post(`${API_BASE_URL}/bot/config`, payload, {
-        headers: { "x-api-key": "imperadorvip-secure-key-2025" },
-      });
-
-      if (response.status === 200) {
-        setMessage("✅ Configuração salva com sucesso!");
-      } else {
-        setError("⚠️ Falha ao salvar configuração. Verifique as variáveis.");
-      }
-    } catch (err) {
-      setError("❌ Erro: " + (err.response?.data?.detail || err.message));
+      const r = await h.post("/bot/config", payload, { headers: authHeaders });
+      if (r?.data?.ok) setMessage("✅ Configuração salva!");
+      else setError("⚠️ Falha ao salvar configuração.");
+    } catch (e) {
+      showErr("❌ Erro ao salvar configuração", e);
     } finally {
       setLoading(false);
     }
   };
 
-  // ================================
-  // ATIVAR / DESATIVAR BOT
-  // ================================
+  // ---------- Alternar bot ----------
   const handleToggleBot = async (enable) => {
+    setError(""); setMessage(""); setLoading(true);
     try {
-      setLoading(true);
-      setError("");
-      setMessage("");
-
-      // Corrigindo endpoints para evitar 404
-      const endpoint = enable ? "/bot/start" : "/bot/stop";
-
-      const response = await axios.post(`${API_BASE_URL}${endpoint}`, null, {
-        headers: { "x-api-key": "imperadorvip-secure-key-2025" },
-      });
-
-      if (response.status === 200) {
-        setMessage(enable ? "🤖 Bot ativado com sucesso!" : "⛔ Bot desativado com sucesso!");
+      const endpoint = enable ? "/bot/enable" : "/bot/disable";
+      const r = await h.post(endpoint, null, { headers: authHeaders });
+      if (r?.data?.ok) {
+        setMessage(enable ? "🤖 Bot ativado!" : "⛔ Bot desativado!");
       } else {
-        setError("⚠️ Erro ao alternar bot (status " + response.status + ")");
+        setError("⚠️ Erro ao alternar bot.");
       }
-    } catch (err) {
-      setError("❌ Erro ao alternar bot: " + (err.response?.data?.detail || err.message));
+    } catch (e) {
+      showErr("❌ Erro ao alternar bot", e);
     } finally {
       setLoading(false);
     }
   };
 
-  // ================================
-  // TESTAR ANÁLISE TWELVEDATA
-  // ================================
+  // ---------- Testar análise ----------
   const handleTestAnalysis = async () => {
+    setError(""); setMessage(""); setLoading(true);
     try {
-      setLoading(true);
-      setError("");
-      setMessage("");
-
-      const payload = {
-        symbol: "EUR/USD",
-        interval: "1min",
-      };
-
-      const response = await axios.post(`${API_BASE_URL}/analyze`, payload, {
-        headers: { "x-api-key": "imperadorvip-secure-key-2025" },
-      });
-
-      if (response.data?.signal) {
-        const { signal, accuracy } = response.data;
-        setMessage(`✅ Análise OK! Sinal: ${signal} (${accuracy || "100"}%)`);
-      } else if (response.data?.values) {
-        setMessage("✅ Dados recebidos, mas sem sinal calculado ainda.");
+      const payload = { symbol: "EUR/USD", interval: "1min" };
+      const r = await h.post("/analyze", payload, { headers: authHeaders });
+      const d = r?.data;
+      if (d?.signal) {
+        setMessage(`✅ Análise OK! Sinal: ${d.signal} (${d.confidence}%) • Preço: ${d.price}`);
       } else {
-        setError("⚠️ Falha ao processar análise.");
+        setError("⚠️ Resposta sem sinal.");
       }
-    } catch (err) {
-      setError("❌ Erro na análise: " + (err.response?.data?.detail || err.message));
+    } catch (e) {
+      showErr("❌ Erro na análise", e);
     } finally {
       setLoading(false);
     }
   };
 
-  // ================================
-  // INTERFACE
-  // ================================
   return (
-    <div className="p-6 bg-gray-900 text-white rounded-xl shadow-lg">
-      <h2 className="text-2xl font-bold text-yellow-400 mb-4">⚙️ IA do Imperador</h2>
+    <div className="p-6 bg-gray-900 text-white rounded-xl shadow-lg space-y-4">
+      <h2 className="text-2xl font-bold text-yellow-400">⚙️ IA do Imperador</h2>
 
-      <div className="mb-4">
-        <label className="block mb-2">Token Telegram (Opcional)</label>
-        <input
-          type="text"
-          value={telegramToken}
-          onChange={(e) => setTelegramToken(e.target.value)}
-          className="w-full p-2 rounded bg-gray-800 border border-gray-700"
-          placeholder="Insira o Token do Bot"
-        />
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div>
+          <label className="block mb-1">URL do Railway</label>
+          <input
+            className="w-full p-2 rounded bg-gray-800 border border-gray-700"
+            value={apiBase}
+            onChange={(e) => setApiBase(e.target.value)}
+            placeholder="https://...railway.app"
+          />
+        </div>
+        <div>
+          <label className="block mb-1">API Key (x-api-key)</label>
+          <input
+            className="w-full p-2 rounded bg-gray-800 border border-gray-700"
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+            placeholder="imperadorvip-secure-key-2025"
+          />
+        </div>
       </div>
 
-      <div className="mb-4">
-        <label className="block mb-2">Chat ID Telegram</label>
-        <input
-          type="text"
-          value={chatId}
-          onChange={(e) => setChatId(e.target.value)}
-          className="w-full p-2 rounded bg-gray-800 border border-gray-700"
-          placeholder="@IAdoimperador"
-        />
+      <button
+        onClick={handleTest}
+        disabled={loading}
+        className="bg-indigo-600 hover:bg-indigo-700 px-4 py-2 rounded w-full"
+      >
+        {loading ? "Testando..." : "🔌 Testar Conexão (/health)"}
+      </button>
+
+      <hr className="border-gray-700" />
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div>
+          <label className="block mb-1">Token Telegram (Opcional)</label>
+          <input
+            className="w-full p-2 rounded bg-gray-800 border border-gray-700"
+            value={telegramToken}
+            onChange={(e) => setTelegramToken(e.target.value)}
+            placeholder="123456:ABC..."
+          />
+        </div>
+        <div>
+          <label className="block mb-1">Chat ID Telegram</label>
+          <input
+            className="w-full p-2 rounded bg-gray-800 border border-gray-700"
+            value={chatId}
+            onChange={(e) => setChatId(e.target.value)}
+            placeholder="@IAdoimperador"
+          />
+        </div>
       </div>
 
       <button
@@ -139,36 +158,31 @@ export default function RailwayConfig() {
         {loading ? "Salvando..." : "💾 Salvar Configuração"}
       </button>
 
-      <hr className="my-6 border-gray-700" />
-
-      <div className="flex justify-between mb-4">
+      <div className="flex gap-3">
         <button
           onClick={() => handleToggleBot(true)}
-          className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded"
+          className="flex-1 bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded"
         >
           🟢 Ativar Bot
         </button>
         <button
           onClick={() => handleToggleBot(false)}
-          className="bg-red-600 hover:bg-red-700 px-4 py-2 rounded"
+          className="flex-1 bg-red-600 hover:bg-red-700 px-4 py-2 rounded"
         >
           🔴 Desativar Bot
         </button>
       </div>
-
-      <hr className="my-6 border-gray-700" />
 
       <button
         onClick={handleTestAnalysis}
         disabled={loading}
         className="bg-yellow-600 hover:bg-yellow-700 px-4 py-2 rounded w-full"
       >
-        ⚡ Testar Análise com Dados Reais
+        ⚡ Testar Análise (EUR/USD • 1min)
       </button>
 
-      {message && <p className="mt-4 text-green-400">{message}</p>}
-      {error && <p className="mt-4 text-red-400">{error}</p>}
+      {message && <p className="mt-2 text-green-400">{message}</p>}
+      {error && <p className="mt-2 text-red-400">{error}</p>}
     </div>
   );
 }
-
