@@ -1,142 +1,211 @@
+import os
+from typing import Optional, Dict, Any
+from datetime import datetime
+
+import httpx
+import numpy as np
+import pandas as pd
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import requests
-import pandas as pd
-import numpy as np
-from ta.trend import EMAIndicator, MACD
-from ta.momentum import RSIIndicator
-from datetime import datetime
+from dotenv import load_dotenv
 
-# ============================================
-# CONFIGURAÇÃO BÁSICA
-# ============================================
+# ====== Env ======
+load_dotenv()
 
-app = FastAPI(title="IA do Imperador", version="2.0")
+API_KEY = os.getenv("API_KEY", "imperadorvip-secure-key-2025")
+TWELVEDATA_KEY = os.getenv("TWELVEDATA_KEY", "")
+APP_NAME = os.getenv("APP_NAME", "ImperadorVIP")
+MODE = os.getenv("MODE", "production")
+BOT_ACTIVE_DEFAULT = os.getenv("BOT_ACTIVE", "false").lower() == "true"
 
-API_KEY = "imperadorvip-secure-key-2025"
-TWELVEDATA_URL = "https://api.twelvedata.com/time_series"
-TWELVEDATA_KEY = "demo"  # troque pela sua chave real
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
-origins = ["*"]
+# Estado em memória (reset a cada deploy)
+STATE: Dict[str, Any] = {
+    "bot_active": BOT_ACTIVE_DEFAULT,
+    "telegram": {
+        "token": TELEGRAM_BOT_TOKEN or None,
+        "chat_id": TELEGRAM_CHAT_ID or None,
+    }
+}
+
+# ====== App ======
+app = FastAPI(title=APP_NAME)
+
+allowed_origins = os.getenv("ALLOWED_ORIGINS", "*")
+origins = [o.strip() for o in allowed_origins.split(",")] if allowed_origins else ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=origins if origins != ["*"] else ["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ============================================
-# MODELOS DE ENTRADA
-# ============================================
+# ====== Schemas ======
+class AnalyzeInput(BaseModel):
+    symbol: str = "EUR/USD"
+    interval: str = "1min"
 
 class BotConfig(BaseModel):
-    telegram_token: str | None = None
-    chat_id: str | None = None
+    telegram_token: Optional[str] = None
+    chat_id: Optional[str] = None
 
-class AnalyzeRequest(BaseModel):
-    symbol: str
-    interval: str
-
-# ============================================
-# VALIDAÇÃO DE CHAVE DE API
-# ============================================
-
-def verify_api_key(x_api_key: str = Header(None)):
+# ====== Utils ======
+def require_key(x_api_key: Optional[str]):
     if x_api_key != API_KEY:
-        raise HTTPException(status_code=403, detail="Chave de API inválida")
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
-# ============================================
-# ENDPOINTS DO BOT
-# ============================================
+def td_symbol_fix(symbol: str) -> str:
+    # TwelveData usa "EUR/USD" → "EUR/USD" mesmo; se vier "EURUSD" normaliza
+    if "/" not in symbol and len(symbol) == 6:
+        return f"{symbol[:3]}/{symbol[3:]}"
+    return symbol
 
-bot_enabled = False
-bot_config = {}
+async def fetch_twelvedata(symbol: str, interval: str) -> pd.DataFrame:
+    if not TWELVEDATA_KEY:
+        raise HTTPException(status_code=400, detail="Falta TWELVEDATA_KEY")
 
-@app.post("/bot/config")
-def set_config(config: BotConfig, x_api_key: str = Header(None)):
-    verify_api_key(x_api_key)
-    global bot_config
-    bot_config = config.dict()
-    return {"status": "ok", "config": bot_config}
-
-@app.post("/bot/start")
-def start_bot(x_api_key: str = Header(None)):
-    verify_api_key(x_api_key)
-    global bot_enabled
-    bot_enabled = True
-    return {"status": "started", "message": "Bot ativado com sucesso"}
-
-@app.post("/bot/stop")
-def stop_bot(x_api_key: str = Header(None)):
-    verify_api_key(x_api_key)
-    global bot_enabled
-    bot_enabled = False
-    return {"status": "stopped", "message": "Bot desativado com sucesso"}
-
-# ============================================
-# ANÁLISE TWELVEDATA + INDICADORES
-# ============================================
-
-@app.post("/analyze")
-def analyze(req: AnalyzeRequest, x_api_key: str = Header(None)):
-    verify_api_key(x_api_key)
-
+    base = "https://api.twelvedata.com/time_series"
     params = {
-        "symbol": req.symbol,
-        "interval": req.interval,
+        "symbol": td_symbol_fix(symbol),
+        "interval": interval,
         "apikey": TWELVEDATA_KEY,
-        "outputsize": 60
+        "outputsize": 100,     # dá para ajustar
+        "format": "JSON",
     }
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.get(base, params=params)
+    if r.status_code != 200:
+        raise HTTPException(status_code=400, detail=f"Falha TwelveData HTTP {r.status_code}")
 
-    r = requests.get(TWELVEDATA_URL, params=params)
     data = r.json()
-
-    if "values" not in data:
+    if data.get("status") != "ok" or "values" not in data:
         raise HTTPException(status_code=400, detail="400: Falha ao consultar TwelveData")
 
+    # Converte para DataFrame
     df = pd.DataFrame(data["values"])
-    df = df.astype({"open": float, "high": float, "low": float, "close": float})
-    df["close"] = df["close"].astype(float)
-    df = df[::-1]  # inverte a ordem para mais recente no fim
+    # garante ordem crescente por datetime
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    df = df.sort_values("datetime").reset_index(drop=True)
 
-    # ==========================
-    # INDICADORES TÉCNICOS
-    # ==========================
-    df["EMA_fast"] = EMAIndicator(close=df["close"], window=5).ema_indicator()
-    df["EMA_slow"] = EMAIndicator(close=df["close"], window=20).ema_indicator()
-    df["RSI"] = RSIIndicator(close=df["close"], window=14).rsi()
+    # preços como float
+    for c in ["open", "high", "low", "close"]:
+        df[c] = df[c].astype(float)
 
-    macd = MACD(close=df["close"])
-    df["MACD"] = macd.macd()
-    df["Signal"] = macd.macd_signal()
+    return df
 
-    last = df.iloc[-1]
+def simple_signal_from_df(df: pd.DataFrame) -> Dict[str, Any]:
+    # Indicadores simples (RSI / MME)
+    close = df["close"].values
+    # MME curta e longa
+    ema_fast = pd.Series(close).ewm(span=9, adjust=False).mean().values
+    ema_slow = pd.Series(close).ewm(span=21, adjust=False).mean().values
 
-    # ==========================
-    # LÓGICA DE SINAL
-    # ==========================
-    signal = "NEUTRO"
-    confidence = 50
+    # RSI simplificado
+    delta = np.diff(close, prepend=close[0])
+    up = np.where(delta > 0, delta, 0.0)
+    down = np.where(delta < 0, -delta, 0.0)
+    roll_up = pd.Series(up).rolling(14).mean().values
+    roll_down = pd.Series(down).rolling(14).mean().values
+    rs = np.where(roll_down == 0, np.inf, roll_up / roll_down)
+    rsi = 100 - (100 / (1 + rs))
 
-    if last["EMA_fast"] > last["EMA_slow"] and last["MACD"] > last["Signal"] and last["RSI"] < 70:
-        signal = "CALL"
-        confidence = 94.3
-    elif last["EMA_fast"] < last["EMA_slow"] and last["MACD"] < last["Signal"] and last["RSI"] > 30:
-        signal = "PUT"
-        confidence = 93.7
+    last_close = close[-1]
+    last_rsi = float(np.nan_to_num(rsi[-1], nan=50.0))
+    last_ef = float(ema_fast[-1])
+    last_es = float(ema_slow[-1])
+
+    # regra:
+    # compra se MME9 > MME21 e RSI<70
+    # venda se MME9 < MME21 e RSI>30
+    # senão neutro
+    if last_ef > last_es and last_rsi < 70:
+        sig = "CALL"
+        conf = min(95, 50 + abs(last_ef - last_es) * 2000)
+    elif last_ef < last_es and last_rsi > 30:
+        sig = "PUT"
+        conf = min(95, 50 + abs(last_ef - last_es) * 2000)
+    else:
+        sig = "NEUTRO"
+        conf = 50
 
     return {
-        "timestamp": datetime.now().isoformat(),
-        "symbol": req.symbol,
-        "interval": req.interval,
-        "signal": signal,
-        "accuracy": confidence,
-        "close": last["close"],
-        "rsi": last["RSI"],
-        "ema_fast": last["EMA_fast"],
-        "ema_slow": last["EMA_slow"],
-        "macd": last["MACD"],
-        "signal_line": last["Signal"]
+        "signal": sig,
+        "confidence": round(conf, 1),
+        "rsi": round(last_rsi, 2),
+        "ema_fast": round(last_ef, 6),
+        "ema_slow": round(last_es, 6),
+        "price": round(last_close, 6),
     }
+
+# ====== Health / Status ======
+@app.get("/")
+def root():
+    return {
+        "status": "online",
+        "app": APP_NAME,
+        "mode": MODE,
+        "bot_active": STATE["bot_active"],
+        "time": datetime.utcnow().isoformat() + "Z",
+    }
+
+@app.get("/health")
+def health():
+    return {"ok": True}
+
+@app.get("/status")
+def status():
+    return {
+        "ok": True,
+        "app": APP_NAME,
+        "bot_active": STATE["bot_active"],
+        "telegram": STATE["telegram"],
+    }
+
+# ====== Bot config ======
+@app.post("/bot/config")
+def save_bot_config(cfg: BotConfig, x_api_key: Optional[str] = Header(None)):
+    require_key(x_api_key)
+    if cfg.telegram_token is not None:
+        STATE["telegram"]["token"] = cfg.telegram_token or None
+    if cfg.chat_id is not None:
+        STATE["telegram"]["chat_id"] = cfg.chat_id or None
+    return {"ok": True, "telegram": STATE["telegram"]}
+
+@app.post("/bot/enable")
+def enable_bot(x_api_key: Optional[str] = Header(None)):
+    require_key(x_api_key)
+    STATE["bot_active"] = True
+    return {"ok": True, "bot_active": True}
+
+@app.post("/bot/disable")
+def disable_bot(x_api_key: Optional[str] = Header(None)):
+    require_key(x_api_key)
+    STATE["bot_active"] = False
+    return {"ok": True, "bot_active": False}
+
+# ====== Analyze ======
+@app.post("/analyze")
+async def analyze(data: AnalyzeInput, x_api_key: Optional[str] = Header(None)):
+    require_key(x_api_key)
+    df = await fetch_twelvedata(data.symbol, data.interval)
+    res = simple_signal_from_df(df)
+    return {
+        "symbol": td_symbol_fix(data.symbol),
+        "interval": data.interval,
+        "signal": res["signal"],
+        "confidence": res["confidence"],
+        "indicators": {
+            "rsi": res["rsi"],
+            "ema_fast": res["ema_fast"],
+            "ema_slow": res["ema_slow"],
+        },
+        "price": res["price"],
+        "sample": len(df),
+    }
+
 
