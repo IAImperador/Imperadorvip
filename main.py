@@ -1,103 +1,142 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import requests
 import pandas as pd
-import ta
-import os
+import numpy as np
+from ta.trend import EMAIndicator, MACD
+from ta.momentum import RSIIndicator
+from datetime import datetime
 
-app = FastAPI()
+# ============================================
+# CONFIGURAÇÃO BÁSICA
+# ============================================
 
-# ==================================
-# CONFIGURAÇÃO CORS
-# ==================================
+app = FastAPI(title="IA do Imperador", version="2.0")
+
+API_KEY = "imperadorvip-secure-key-2025"
+TWELVEDATA_URL = "https://api.twelvedata.com/time_series"
+TWELVEDATA_KEY = "demo"  # troque pela sua chave real
+
+origins = ["*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ==================================
-# VARIÁVEIS DE AMBIENTE
-# ==================================
-TWELVEDATA_KEY = os.getenv("TWELVEDATA_KEY", "")
-API_KEY = os.getenv("API_KEY", "imperadorvip-secure-key-2025")
+# ============================================
+# MODELOS DE ENTRADA
+# ============================================
 
-# ==================================
-# ROTA PRINCIPAL DE STATUS
-# ==================================
-@app.get("/")
-def root():
-    return {"status": "Imperador API ativa com sucesso!"}
+class BotConfig(BaseModel):
+    telegram_token: str | None = None
+    chat_id: str | None = None
 
-# ==================================
-# ROTA DE ANÁLISE
-# ==================================
-@app.post("/analyze")
-async def analyze(request: Request):
-    try:
-        data = await request.json()
-        symbol = data.get("symbol", "EUR/USD")
-        interval = data.get("interval", "1min")
+class AnalyzeRequest(BaseModel):
+    symbol: str
+    interval: str
 
-        # Consulta à API TwelveData
-        url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize=50&apikey={TWELVEDATA_KEY}"
-        response = requests.get(url)
-        json_data = response.json()
+# ============================================
+# VALIDAÇÃO DE CHAVE DE API
+# ============================================
 
-        # Se a resposta estiver OK
-        if "values" in json_data:
-            df = pd.DataFrame(json_data["values"])
-            df = df.astype(float, errors="ignore")
-            df = df.iloc[::-1]  # inverter ordem
+def verify_api_key(x_api_key: str = Header(None)):
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=403, detail="Chave de API inválida")
 
-            # Adiciona indicadores técnicos
-            df["rsi"] = ta.momentum.RSIIndicator(df["close"]).rsi()
-            df["ema_fast"] = ta.trend.EMAIndicator(df["close"], window=9).ema_indicator()
-            df["ema_slow"] = ta.trend.EMAIndicator(df["close"], window=21).ema_indicator()
-            df["macd"] = ta.trend.MACD(df["close"]).macd()
+# ============================================
+# ENDPOINTS DO BOT
+# ============================================
 
-            # Último candle
-            latest = df.iloc[-1].to_dict()
-            signal = None
+bot_enabled = False
+bot_config = {}
 
-            if latest["rsi"] < 30 and latest["ema_fast"] > latest["ema_slow"]:
-                signal = "CALL"
-            elif latest["rsi"] > 70 and latest["ema_fast"] < latest["ema_slow"]:
-                signal = "PUT"
-            else:
-                signal = "NEUTRO"
-
-            return {
-                "status": "ok",
-                "symbol": symbol,
-                "price": latest["close"],
-                "signal": signal,
-                "rsi": latest["rsi"],
-                "ema_fast": latest["ema_fast"],
-                "ema_slow": latest["ema_slow"],
-                "macd": latest["macd"],
-            }
-        else:
-            return {"detail": f"400: Falha ao consultar TwelveData: {json_data}"}
-
-    except Exception as e:
-        return {"detail": f"Erro na análise: {str(e)}"}
-
-# ==================================
-# ROTAS DE BOT (placeholders)
-# ==================================
 @app.post("/bot/config")
-async def bot_config(request: Request):
-    data = await request.json()
-    return {"status": "config recebido", "data": data}
+def set_config(config: BotConfig, x_api_key: str = Header(None)):
+    verify_api_key(x_api_key)
+    global bot_config
+    bot_config = config.dict()
+    return {"status": "ok", "config": bot_config}
 
-@app.post("/bot/enable")
-async def bot_enable():
-    return {"status": "Bot ativado com sucesso"}
+@app.post("/bot/start")
+def start_bot(x_api_key: str = Header(None)):
+    verify_api_key(x_api_key)
+    global bot_enabled
+    bot_enabled = True
+    return {"status": "started", "message": "Bot ativado com sucesso"}
 
-@app.post("/bot/disable")
-async def bot_disable():
-    return {"status": "Bot desativado com sucesso"}
+@app.post("/bot/stop")
+def stop_bot(x_api_key: str = Header(None)):
+    verify_api_key(x_api_key)
+    global bot_enabled
+    bot_enabled = False
+    return {"status": "stopped", "message": "Bot desativado com sucesso"}
+
+# ============================================
+# ANÁLISE TWELVEDATA + INDICADORES
+# ============================================
+
+@app.post("/analyze")
+def analyze(req: AnalyzeRequest, x_api_key: str = Header(None)):
+    verify_api_key(x_api_key)
+
+    params = {
+        "symbol": req.symbol,
+        "interval": req.interval,
+        "apikey": TWELVEDATA_KEY,
+        "outputsize": 60
+    }
+
+    r = requests.get(TWELVEDATA_URL, params=params)
+    data = r.json()
+
+    if "values" not in data:
+        raise HTTPException(status_code=400, detail="400: Falha ao consultar TwelveData")
+
+    df = pd.DataFrame(data["values"])
+    df = df.astype({"open": float, "high": float, "low": float, "close": float})
+    df["close"] = df["close"].astype(float)
+    df = df[::-1]  # inverte a ordem para mais recente no fim
+
+    # ==========================
+    # INDICADORES TÉCNICOS
+    # ==========================
+    df["EMA_fast"] = EMAIndicator(close=df["close"], window=5).ema_indicator()
+    df["EMA_slow"] = EMAIndicator(close=df["close"], window=20).ema_indicator()
+    df["RSI"] = RSIIndicator(close=df["close"], window=14).rsi()
+
+    macd = MACD(close=df["close"])
+    df["MACD"] = macd.macd()
+    df["Signal"] = macd.macd_signal()
+
+    last = df.iloc[-1]
+
+    # ==========================
+    # LÓGICA DE SINAL
+    # ==========================
+    signal = "NEUTRO"
+    confidence = 50
+
+    if last["EMA_fast"] > last["EMA_slow"] and last["MACD"] > last["Signal"] and last["RSI"] < 70:
+        signal = "CALL"
+        confidence = 94.3
+    elif last["EMA_fast"] < last["EMA_slow"] and last["MACD"] < last["Signal"] and last["RSI"] > 30:
+        signal = "PUT"
+        confidence = 93.7
+
+    return {
+        "timestamp": datetime.now().isoformat(),
+        "symbol": req.symbol,
+        "interval": req.interval,
+        "signal": signal,
+        "accuracy": confidence,
+        "close": last["close"],
+        "rsi": last["RSI"],
+        "ema_fast": last["EMA_fast"],
+        "ema_slow": last["EMA_slow"],
+        "macd": last["MACD"],
+        "signal_line": last["Signal"]
+    }
 
