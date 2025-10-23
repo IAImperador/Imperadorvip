@@ -2,6 +2,6 @@ fastapi
 uvicorn
 requests
 pandas
+numpy
 ta
-python-dotenv
-aiohttp
+python-multipart
