@@ -5,7 +5,7 @@ export default function RailwayConfig() {
   const [apiBase, setApiBase] = useState("https://imperadorvip-production.up.railway.app");
   const [apiKey, setApiKey] = useState("imperadorvip-secure-key-2025");
 
-  const [telegramToken, setTelegramToken] = useState("");
+  const [telegramToken, setTelegramToken] = useState("aa65a6636b6f48c2a7970e02611b25f0");
   const [chatId, setChatId] = useState("");
 
   const [loading, setLoading] = useState(false);
