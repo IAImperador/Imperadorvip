@@ -1,14 +1,14 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-import requests, os, time, threading
-from dotenv import load_dotenv
+import asyncio
+import requests
+import os
 import random
+from datetime import datetime
 
-# Carregar variáveis .env
-load_dotenv()
+app = FastAPI(title="ImperadorVIP Signal Engine")
 
-app = FastAPI(title="IA do Imperador - Live Signals")
-
+# --- CORS ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,100 +17,75 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# =============================
-# Configurações e variáveis
-# =============================
-TWELVEDATA_KEY = os.getenv("TWELVEDATA_API_KEY")
-BASE_URL = "https://api.twelvedata.com/time_series"
-LIVE_SIGNAL = {"status": "aguardando", "sinal": None, "confiança": 0, "par": None, "horario": None}
+# --- Variáveis ---
+TWELVEDATA_KEY = os.getenv("TWELVEDATA_API_KEY", "")
+API_KEY = os.getenv("API_KEY", "imperadorvip-secure-key-2025")
 
-# =============================
-# Função: análise de confluência
-# =============================
-def gerar_analise_simples(symbol="EUR/USD"):
+if not TWELVEDATA_KEY:
+    print("⚠️ TWELVEDATA_KEY não definida. Configure no Railway.")
+
+# --- Simulação de Análise ---
+def analisar_confluencias():
+    """Simula cálculo de confiança e decisão de CALL/PUT"""
+    direcao = random.choice(["CALL", "PUT"])
+    confianca = random.randint(70, 100)
+    return {"sinal": direcao, "confianca": confianca}
+
+# --- Endpoint base de saúde ---
+@app.get("/")
+def home():
+    return {"status": "online", "timestamp": datetime.now().isoformat()}
+
+# --- Endpoint para análise manual ---
+@app.post("/analyze")
+def analisar_sinal(req: Request):
     try:
-        params = {
-            "symbol": symbol,
-            "interval": "1min",
-            "outputsize": 5,
-            "apikey": TWELVEDATA_KEY
-        }
-        r = requests.get(BASE_URL, params=params, timeout=10)
-        data = r.json()
-
+        data = requests.get(
+            f"https://api.twelvedata.com/time_series?symbol=EUR/USD&interval=1min&apikey={TWELVEDATA_KEY}"
+        ).json()
         if "values" not in data:
-            raise Exception(data.get("message", "Erro desconhecido"))
+            raise HTTPException(status_code=400, detail="Falha ao consultar TwelveData")
 
-        # Simplificação — usa última vela
-        valores = data["values"]
-        ultima = float(valores[0]["close"])
-        penultima = float(valores[1]["close"])
-
-        # Exemplo básico de lógica direcional
-        direcao = "CALL" if ultima > penultima else "PUT"
-        confianca = random.randint(85, 99)  # Simulação (substituir por IA real depois)
-
+        resultado = analisar_confluencias()
         return {
-            "symbol": symbol,
-            "sinal": direcao,
-            "confianca": confianca,
-            "ultimo_preco": ultima,
-            "penultimo": penultima,
-            "status": "ok"
+            "timestamp": datetime.now().isoformat(),
+            "sinal": resultado["sinal"],
+            "confianca": resultado["confianca"],
+            "base": "EUR/USD",
+            "status": "ok",
         }
 
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Falha ao consultar TwelveData: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-# =============================
-# Rota 1 — Teste de conexão
-# =============================
-@app.get("/")
-def root():
-    return {"status": "online", "mensagem": "Servidor ativo da IA do Imperador"}
 
-# =============================
-# Rota 2 — Sinal manual
-# =============================
-@app.post("/signal/test")
-def test_signal():
-    result = gerar_analise_simples()
-    return result
-
-# =============================
-# Rota 3 — Sinal ao vivo (a cada 60s)
-# =============================
+# --- ✅ Nova rota /signal/live ---
 @app.get("/signal/live")
-def live_signal():
-    global LIVE_SIGNAL
-    return LIVE_SIGNAL
+async def sinal_ao_vivo():
+    """Envia sinais de 60 em 60s, apenas com confiança >= 90%"""
+    try:
+        print("🚀 Modo Live iniciado...")
+        resultados = []
 
-def atualizar_sinal_automatico():
-    global LIVE_SIGNAL
-    while True:
-        try:
-            sinal = gerar_analise_simples("EUR/USD")
-            if sinal["confianca"] >= 90:
-                LIVE_SIGNAL.update({
-                    "status": "ativo",
-                    "sinal": sinal["sinal"],
-                    "confiança": sinal["confianca"],
-                    "par": sinal["symbol"],
-                    "horario": time.strftime("%H:%M:%S")
-                })
-                print(f"[{LIVE_SIGNAL['horario']}] Sinal emitido: {LIVE_SIGNAL}")
+        for i in range(3):  # 3 ciclos (3 minutos)
+            analise = analisar_confluencias()
+            if analise["confianca"] >= 90:
+                resultado = {
+                    "hora": datetime.now().strftime("%H:%M:%S"),
+                    "ativo": "EUR/USD",
+                    "sinal": analise["sinal"],
+                    "confianca": analise["confianca"],
+                    "status": "📡 Enviado",
+                }
+                print(resultado)
+                resultados.append(resultado)
             else:
-                LIVE_SIGNAL.update({
-                    "status": "aguardando",
-                    "sinal": None,
-                    "confiança": sinal["confianca"],
-                    "par": sinal["symbol"],
-                    "horario": time.strftime("%H:%M:%S")
-                })
-        except Exception as e:
-            LIVE_SIGNAL["status"] = f"erro: {e}"
+                print(f"Ignorado ({analise['confianca']}%)")
 
-        time.sleep(60)  # intervalo de 60 segundos
+            await asyncio.sleep(60)
 
-# Iniciar thread automática
-threading.Thread(target=atualizar_sinal_automatico, daemon=True).start()
+        return {"status": "finalizado", "resultados": resultados}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro em modo live: {str(e)}")
+
