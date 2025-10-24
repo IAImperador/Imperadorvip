@@ -89,3 +89,4 @@ async def sinal_ao_vivo():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro em modo live: {str(e)}")
 
+
