@@ -121,4 +121,5 @@ if __name__ == "__main__":
     if BOT_ACTIVE:
         Thread(target=loop_analise_automatica, daemon=True).start()
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORTA", 8080)))
-
+from routes.signal_live import signal_live_router
+app.include_router(signal_live_router)
