@@ -1,17 +1,40 @@
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+# main.py — IA do Imperador (versão com rota /signal/live)
+
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-import asyncio, httpx, os, json, datetime, random
+from fastapi.responses import JSONResponse
+import os
+import uvicorn
+from routes.signal_live import router as signal_live_router  # ✅ Import da nova rota
 
-app = FastAPI(title="IA do Imperador - Live Signals")
+# ========================================================
+# CONFIGURAÇÃO PRINCIPAL DO APP
+# ========================================================
+app = FastAPI(
+    title="IA do Imperador",
+    description="API profissional de sinais com TwelveData + Telegram",
+    version="4.0"
+)
 
-# ============= CORS LIBERADO =============
-origins = [
-    "https://imperadorvip-production.up.railway.app",
-    "https://imperadorvip.base44.app",
-    "https://app.base44.io",
-    "*"
-]
+# --------------------------------------------------------
+# VARIÁVEIS DE AMBIENTE
+# --------------------------------------------------------
+API_KEY = os.getenv("API_KEY", "imperadorvip-secure-key-2025")
+APP_NAME = os.getenv("NOME_DO_APLICATIVO", "ImperadorVIP")
+TWELVEDATA_KEY = os.getenv("TWELVEDATA_API_KEY")
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+CHAT_ID = os.getenv("ID_DE_CHAT_DO_TELEGRAM", "@IAdoimperador")
+PORT = int(os.getenv("PORTA", 8080))
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*")
+
+# --------------------------------------------------------
+# CONFIGURAÇÃO DE CORS
+# --------------------------------------------------------
+if ALLOWED_ORIGINS == "*":
+    origins = ["*"]
+else:
+    origins = [o.strip() for o in ALLOWED_ORIGINS.split(",")]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -20,95 +43,83 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ============= VARIÁVEIS .ENV =============
-API_KEY = os.getenv
-# ==========================
-# 🔥 ROTA /signal/live — IA do Imperador
-# ==========================
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-import aiohttp, asyncio, os, time
-from datetime import datetime
+# ========================================================
+# ROTAS PRINCIPAIS
+# ========================================================
 
-app = FastAPI()
-
-# CORS
-origins = [
-    "https://app.base44.io",
-    "https://imperadorvip.base44.app",
-    "https://imperadorvip-production.up.railway.app",
-    "*",
-]
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY")
-SYMBOL = "EUR/USD"
-INTERVAL = "1min"
-MIN_CONFIDENCE = 90  # filtro de mínima confiança
-SIGNAL_CACHE = {"last": None, "confidence": 0}
+@app.get("/")
+async def root():
+    """Status geral do servidor"""
+    return {
+        "status": "online",
+        "app": APP_NAME,
+        "message": f"Servidor {APP_NAME} ativo e pronto para sinais ao vivo!"
+    }
 
 
-async def get_price_data():
-    """Consulta dados reais da TwelveData"""
-    url = f"https://api.twelvedata.com/time_series?symbol={SYMBOL}&interval={INTERVAL}&apikey={TWELVEDATA_API_KEY}&outputsize=5"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as resp:
-            if resp.status != 200:
-                raise HTTPException(status_code=400, detail="Falha ao consultar TwelveData")
-            data = await resp.json()
-            if "values" not in data:
-                raise HTTPException(status_code=404, detail="Sem dados válidos da API")
-            return data["values"]
+@app.get("/status")
+async def status_check():
+    """Verifica status geral da API"""
+    return {
+        "API_KEY": "Configurada" if API_KEY else "Faltando",
+        "TWELVEDATA_KEY": "Configurada" if TWELVEDATA_KEY else "Faltando",
+        "BOT_TOKEN": "Configurado" if BOT_TOKEN else "Faltando",
+        "CHAT_ID": CHAT_ID,
+        "PORT": PORT,
+    }
 
 
-def analyze_signal(values):
-    """Analisa tendência e retorna sinal e confiança"""
-    last = float(values[0]["close"])
-    prev = float(values[1]["close"])
-    diff = last - prev
+@app.post("/analyze")
+async def analyze(request: Request):
+    """Análise rápida EUR/USD"""
+    data = await request.json()
+    symbol = data.get("symbol", "EUR/USD")
+    interval = data.get("interval", "1min")
 
-    # Exemplo simples de confiança
-    confidence = min(99, abs(diff) * 1000)
+    if not TWELVEDATA_KEY:
+        raise HTTPException(status_code=400, detail="Falta TWELVEDATA_KEY")
 
-    if confidence < MIN_CONFIDENCE:
-        return None, confidence
+    import requests
+    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&apikey={TWELVEDATA_KEY}&outputsize=2"
+    r = requests.get(url)
+    if r.status_code != 200:
+        raise HTTPException(status_code=400, detail="Falha ao consultar TwelveData")
 
-    if diff > 0:
-        return "CALL", confidence
-    elif diff < 0:
-        return "PUT", confidence
-    else:
-        return None, confidence
+    json_data = r.json()
+    if "values" not in json_data:
+        raise HTTPException(status_code=400, detail="Dados insuficientes")
 
+    last = float(json_data["values"][0]["close"])
+    prev = float(json_data["values"][1]["close"])
 
-@app.get("/signal/live")
-async def signal_live():
-    """Gera sinal ao vivo a cada 60s"""
-    try:
-        values = await get_price_data()
-        signal, confidence = analyze_signal(values)
-        SIGNAL_CACHE["last"] = signal
-        SIGNAL_CACHE["confidence"] = confidence
+    direction = "CALL" if last > prev else "PUT"
+    confidence = abs((last - prev) / prev * 100)
 
-        if signal:
-            return {
-                "status": "ok",
-                "timestamp": datetime.utcnow().isoformat(),
-                "signal": signal,
-                "confidence": confidence,
-                "pair": SYMBOL,
-            }
-        else:
-            return {
-                "status": "no_signal",
-                "confidence": confidence,
-                "message": "Sem sinal acima do limite mínimo"
-            }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return {
+        "symbol": symbol,
+        "direction": direction,
+        "confidence": round(confidence, 2),
+        "last_price": last,
+        "previous_price": prev,
+    }
+
+# ========================================================
+# INCLUIR ROTAS EXTERNAS (como /signal/live)
+# ========================================================
+app.include_router(signal_live_router)
+
+# ========================================================
+# HANDLER GLOBAL DE ERROS
+# ========================================================
+@app.exception_handler(Exception)
+async def general_exception_handler(request: Request, exc: Exception):
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Erro interno: {str(exc)}"},
+    )
+
+# ========================================================
+# EXECUÇÃO LOCAL (Railway usa este arquivo automaticamente)
+# ========================================================
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="0.0.0.0", port=PORT)
