@@ -53,3 +53,4 @@ async def signal_live():
 
     except Exception as e:
         return {"status": "erro", "detail": str(e)}
+
