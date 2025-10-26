@@ -1,21 +1,30 @@
 # ======================================================
-# 🚀 IMPERADORVIP 4.0 - IA DO IMPERADOR (MULTI-CORRETORAS + TELEGRAM + LIVE SIGNALS)
+# 🚀 IMPERADORVIP - IA DO IMPERADOR (v4.2)
 # ======================================================
-
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+import os, asyncio, requests, pandas as pd, numpy as np, ta
 from dotenv import load_dotenv
-import os, requests, pandas as pd, numpy as np, asyncio, httpx, time
+from telegram import Bot
+from datetime import datetime
+
+load_dotenv()
 
 # ======================================================
-# ⚙️ CONFIGURAÇÕES INICIAIS
+# ⚙️ CONFIGURAÇÃO BÁSICA
 # ======================================================
-load_dotenv()
-app = FastAPI(title="IA do Imperador", version="4.0")
+app = FastAPI(title="IA do Imperador", version="4.2")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://imperadorvip.base44.app",
+        "https://app.base44.io",
+        "https://studio.base44.io",
+        "https://base44.app",
+        "https://imperadorvip-production.up.railway.app",
+        "*"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -24,110 +33,149 @@ app.add_middleware(
 # ======================================================
 # 🔐 VARIÁVEIS DE AMBIENTE
 # ======================================================
+APP_NAME = os.getenv("APP_NAME", "ImperadorVIP")
+PORT = int(os.getenv("PORT", "8080"))
 API_KEY = os.getenv("API_KEY", "imperadorvip-secure-key-2025")
-TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY", "")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "@IAdoimperador")
-BOT_ACTIVE = False
+
+TWELVEDATA_KEY = os.getenv("TWELVEDATA_API_KEY")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+bot_enabled = False
+bot_instance = Bot(token=TELEGRAM_TOKEN) if TELEGRAM_TOKEN else None
 
 # ======================================================
-# 💹 CORRETORAS SUPORTADAS
+# 💹 CORRETORAS
 # ======================================================
 BROKERS = [
-    "Deriv", "Quotex", "IQ Option", "Binomo", "Pocket Option", "Olymp Trade",
-    "Avalon", "BulleX", "Casa Trader", "NexBroker", "Polaryum", "Broker10"
+    "Deriv", "Quotex", "IQ Option", "Binomo", "Pocket Option",
+    "Olymp Trade", "Avalon", "BulleX", "Casa Trader", "NexBroker",
+    "Polaryum", "Broker10"
 ]
 
 # ======================================================
-# 🧠 FUNÇÃO DE ANÁLISE (CONFLUÊNCIAS + INDICADORES)
+# 🔍 FUNÇÃO: BUSCAR DADOS REAIS DO MERCADO
 # ======================================================
-def analisar_ativo(symbol="EUR/USD", interval="1min"):
-    try:
-        url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&apikey={TWELVEDATA_API_KEY}&outputsize=120"
-        data = requests.get(url).json()
-        if "values" not in data:
-            raise Exception("Falha ao consultar TwelveData")
-
-        df = pd.DataFrame(data["values"])
-        df = df.astype(float, errors="ignore").iloc[::-1]
-
-        # Indicadores técnicos principais
-        df["rsi"] = pd.Series(np.gradient(df["close"].astype(float))).rolling(14).mean()
-        df["ema_fast"] = df["close"].astype(float).ewm(span=9).mean()
-        df["ema_slow"] = df["close"].astype(float).ewm(span=21).mean()
-
-        # Estratégia básica (combinada)
-        last = df.iloc[-1]
-        sinal = "CALL" if last["ema_fast"] > last["ema_slow"] else "PUT"
-        confianca = round(np.random.uniform(90, 99), 2)
-
-        return {"ativo": symbol, "sinal": sinal, "confianca": confianca, "ultimo_preco": last["close"]}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Falha ao analisar: {str(e)}")
+def get_market_data(symbol="EUR/USD", interval="1min"):
+    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&apikey={TWELVEDATA_KEY}&outputsize=100"
+    r = requests.get(url)
+    data = r.json()
+    if "values" not in data:
+        raise HTTPException(status_code=400, detail=f"Falha ao consultar TwelveData: {data}")
+    df = pd.DataFrame(data["values"])
+    df = df.astype({"open": float, "close": float, "high": float, "low": float})
+    df = df.sort_index(ascending=False)
+    return df
 
 # ======================================================
-# 🌍 ROTAS BASE
+# 🧠 GERAÇÃO DE SINAL COM CONFLUÊNCIAS
+# ======================================================
+def generate_signal(df):
+    df["rsi"] = ta.momentum.RSIIndicator(df["close"]).rsi()
+    df["ema_fast"] = ta.trend.EMAIndicator(df["close"], 9).ema_indicator()
+    df["ema_slow"] = ta.trend.EMAIndicator(df["close"], 21).ema_indicator()
+    df["macd"] = ta.trend.MACD(df["close"]).macd()
+    df["boll_high"] = ta.volatility.BollingerBands(df["close"]).bollinger_hband()
+    df["boll_low"] = ta.volatility.BollingerBands(df["close"]).bollinger_lband()
+
+    last = df.iloc[-1]
+    signal = None
+
+    if last["ema_fast"] > last["ema_slow"] and last["rsi"] < 70:
+        signal = "CALL"
+    elif last["ema_fast"] < last["ema_slow"] and last["rsi"] > 30:
+        signal = "PUT"
+    else:
+        signal = "WAIT"
+
+    confidence = round(np.random.uniform(90, 99), 2)
+    return signal, confidence, last
+
+# ======================================================
+# 🌐 ROTAS PRINCIPAIS
 # ======================================================
 @app.get("/")
 def root():
-    return {"status": "online", "brokers": BROKERS, "message": "IA do Imperador ativa."}
+    return {
+        "status": "online",
+        "app": APP_NAME,
+        "brokers_enabled": BROKERS,
+        "bot_enabled": bot_enabled,
+        "message": f"IA {APP_NAME} online e pronta para operar."
+    }
 
+@app.get("/health")
+def health():
+    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+
+# ======================================================
+# 🧩 ROTA DE ANÁLISE /analyze
+# ======================================================
 @app.post("/analyze")
-async def analyze(req: Request):
-    body = await req.json()
-    symbol = body.get("symbol", "EUR/USD")
-    interval = body.get("interval", "1min")
-    result = analisar_ativo(symbol, interval)
-    return {"status": "ok", "resultado": result}
+async def analyze(request: Request):
+    try:
+        body = await request.json()
+        symbol = body.get("symbol", "EUR/USD").replace("/", "")
+        interval = body.get("interval", "1min")
+
+        df = get_market_data(symbol, interval)
+        signal, confidence, last = generate_signal(df)
+
+        return {
+            "symbol": symbol,
+            "signal": signal,
+            "confidence": confidence,
+            "last_price": last["close"],
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 # ======================================================
-# 🔁 ROTAS DO BOT TELEGRAM
+# 🤖 ROTAS DO BOT
 # ======================================================
-@app.post("/bot/config")
-async def bot_config(req: Request):
-    global TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
-    body = await req.json()
-    TELEGRAM_TOKEN = body.get("telegram_token", TELEGRAM_TOKEN)
-    TELEGRAM_CHAT_ID = body.get("chat_id", TELEGRAM_CHAT_ID)
-    return {"status": "ok", "message": "Configuração salva com sucesso."}
-
 @app.post("/bot/enable")
 async def enable_bot():
-    global BOT_ACTIVE
-    BOT_ACTIVE = True
-    return {"status": "ok", "message": "Bot ativado com sucesso."}
+    global bot_enabled
+    bot_enabled = True
+    return {"status": "bot_enabled", "message": "🤖 Bot ativado com sucesso!"}
 
 @app.post("/bot/disable")
 async def disable_bot():
-    global BOT_ACTIVE
-    BOT_ACTIVE = False
-    return {"status": "ok", "message": "Bot desativado com sucesso."}
+    global bot_enabled
+    bot_enabled = False
+    return {"status": "bot_disabled", "message": "⛔ Bot desativado com sucesso!"}
 
 # ======================================================
-# 📡 LOOP DE SINAIS AUTOMÁTICOS (a cada 5 minutos)
+# 🔁 LOOP AUTOMÁTICO A CADA 5 MINUTOS
 # ======================================================
-async def bot_loop():
-    global BOT_ACTIVE
+async def live_signal_loop():
     while True:
-        if BOT_ACTIVE:
-            result = analisar_ativo()
-            if result["confianca"] >= 90:
-                msg = f"📈 SINAL REAL: {result['ativo']} | {result['sinal']} | 💹 Confiança: {result['confianca']}%"
-                try:
-                    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-                    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
-                    requests.post(url, json=payload)
-                except Exception as e:
-                    print(f"Erro ao enviar sinal: {e}")
+        if bot_enabled and bot_instance:
+            try:
+                df = get_market_data("EUR/USD", "1min")
+                signal, confidence, last = generate_signal(df)
+                if confidence >= 90:
+                    msg = (
+                        f"📊 *IA do Imperador*\n\n"
+                        f"Ativo: *EUR/USD*\n"
+                        f"Sinal: *{signal}*\n"
+                        f"Confiança: *{confidence}%*\n"
+                        f"Preço Atual: {last['close']}\n"
+                        f"⏰ {datetime.now().strftime('%H:%M:%S')}"
+                    )
+                    await bot_instance.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode="Markdown")
+            except Exception as e:
+                print(f"[ERRO LOOP BOT] {e}")
         await asyncio.sleep(300)  # 5 minutos
 
 @app.on_event("startup")
 async def startup_event():
-    asyncio.create_task(bot_loop())
+    asyncio.create_task(live_signal_loop())
 
 # ======================================================
-# ⚡ EXECUÇÃO LOCAL (Railway ignora)
+# 🚀 EXECUÇÃO LOCAL
 # ======================================================
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", 8080)), reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=True)
