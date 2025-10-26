@@ -1,131 +1,161 @@
-import React, { useState } from "react";
+// ==============================================
+// IA DO IMPERADOR - RAILWAY CONFIG DASHBOARD
+// Base44 + FastAPI (Railway) + TwelveData + Telegram
+// ==============================================
+
+import React, { useState, useEffect } from "react";
 import axios from "axios";
 
+const API_BASE_URL = "https://imperadorvip-production.up.railway.app";
+
 export default function RailwayConfig() {
-  const [baseUrl, setBaseUrl] = useState("https://imperadorvip-production.up.railway.app");
-  const [apiKey, setApiKey] = useState("imperadorvip-secure-key-2025");
-
-  const [telegramToken, setTelegramToken] = useState("");
-  const [chatId, setChatId] = useState("@IAdoimperador");
-
+  const [status, setStatus] = useState("Desconectado");
+  const [twelveKey, setTwelveKey] = useState("");
+  const [botStatus, setBotStatus] = useState(false);
+  const [signal, setSignal] = useState(null);
+  const [confidence, setConfidence] = useState(0);
   const [loading, setLoading] = useState(false);
-  const [message, setMessage] = useState("");
-  const [error, setError] = useState("");
 
-  const headers = { "x-api-key": apiKey };
-
-  const handleHealth = async () => {
+  // =========================
+  // FUNÇÃO PARA TESTAR API
+  // =========================
+  const testarConexao = async () => {
+    setLoading(true);
     try {
-      setLoading(true); setError(""); setMessage("");
-      const r = await axios.get(`${baseUrl}/health`);
-      setMessage(`✅ Conexão OK: ${JSON.stringify(r.data)}`);
+      const res = await axios.get(`${API_BASE_URL}/signal/live`);
+      if (res.data.status === "ok") {
+        setStatus("✅ Conectado com sucesso");
+        setSignal(res.data.sinal);
+        setConfidence(res.data.sinal.confiança);
+      } else {
+        setStatus("⚠️ Nenhum sinal disponível");
+      }
     } catch (err) {
-      setError(`❌ Falha na conexão: ${err.response?.status} - ${JSON.stringify(err.response?.data || err.message)}`);
+      console.error(err);
+      setStatus("❌ Erro de conexão com a API");
     } finally {
       setLoading(false);
     }
   };
 
-  const handleSave = async () => {
+  // =========================
+  // FUNÇÃO PARA TESTAR ANALISE REAL (TwelveData)
+  // =========================
+  const testarAnalise = async () => {
+    setLoading(true);
     try {
-      setLoading(true); setError(""); setMessage("");
-      const payload = {
-        telegram_token: telegramToken || null,
-        chat_id: chatId || null,
-      };
-      const r = await axios.post(`${baseUrl}/bot/config`, payload, { headers });
-      if (r.status === 200) setMessage("✅ Configuração salva!");
-      else setError("⚠️ Falha ao salvar configuração.");
+      const res = await axios.get(`${API_BASE_URL}/signal/live`);
+      if (res.data?.sinal) {
+        setSignal(res.data.sinal);
+        setConfidence(res.data.sinal.confiança);
+      }
     } catch (err) {
-      setError(`❌ Erro: ${JSON.stringify(err.response?.data || err.message)}`);
+      setStatus("❌ Falha ao buscar dados reais");
     } finally {
       setLoading(false);
     }
   };
 
-  const handleToggleBot = async (enable) => {
+  // =========================
+  // FUNÇÃO PARA ATIVAR / DESATIVAR BOT
+  // =========================
+  const alternarBot = async () => {
     try {
-      setLoading(true); setError(""); setMessage("");
-      const endpoint = enable ? "/bot/enable" : "/bot/disable";
-      const r = await axios.post(`${baseUrl}${endpoint}`, null, { headers });
-      if (r.status === 200) setMessage(enable ? "🤖 Bot ativado!" : "⛔ Bot desativado!");
-      else setError("⚠️ Erro ao alternar bot.");
+      const novaAcao = !botStatus;
+      const res = await axios.post(`${API_BASE_URL}/bot/status`, {
+        ativo: novaAcao,
+      });
+      if (res.status === 200) {
+        setBotStatus(novaAcao);
+        alert(
+          novaAcao
+            ? "🤖 Bot ativado com sucesso! (envio a cada 5 minutos)"
+            : "🛑 Bot desativado."
+        );
+      }
     } catch (err) {
-      setError(`❌ Erro ao alternar bot: ${err.response?.status} - ${JSON.stringify(err.response?.data || err.message)}`);
-    } finally {
-      setLoading(false);
+      console.error(err);
+      alert("Erro ao alternar bot (verifique API no Railway)");
     }
   };
 
-  const handleTestAnalysis = async () => {
-    try {
-      setLoading(true); setError(""); setMessage("");
-      const payload = { symbol: "EUR/USD", interval: "1min", auto_send: false };
-      const r = await axios.post(`${baseUrl}/analyze`, payload, { headers });
-      const { result } = r.data || {};
-      setMessage(`✅ Análise OK! Sinal: ${result?.signal} (${result?.confidence}%)`);
-    } catch (err) {
-      setError(`❌ Erro na análise: ${JSON.stringify(err.response?.data || err.message)}`);
-    } finally {
-      setLoading(false);
+  // =========================
+  // REQUISIÇÃO AUTOMÁTICA A CADA 5 MINUTOS
+  // =========================
+  useEffect(() => {
+    if (botStatus) {
+      const intervalo = setInterval(() => {
+        testarAnalise();
+      }, 5 * 60 * 1000); // 5 minutos
+      return () => clearInterval(intervalo);
     }
-  };
+  }, [botStatus]);
 
   return (
-    <div className="p-6 bg-gray-900 text-white rounded-xl shadow-lg space-y-6">
-      <h2 className="text-2xl font-bold text-yellow-400">⚙️ IA do Imperador</h2>
+    <div className="bg-black text-white p-6 rounded-2xl shadow-xl max-w-4xl mx-auto border border-yellow-500">
+      <h1 className="text-3xl font-bold text-yellow-400 mb-6 text-center">
+        👑 IA do Imperador 4.0 + Railway + TwelveData + Telegram
+      </h1>
 
-      {/* URL + API KEY */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div>
-          <label className="block mb-2">URL do Railway</label>
-          <input value={baseUrl} onChange={e => setBaseUrl(e.target.value)} className="w-full p-2 rounded bg-gray-800 border border-gray-700" />
-        </div>
-        <div>
-          <label className="block mb-2">API Key (x-api-key)</label>
-          <input value={apiKey} onChange={e => setApiKey(e.target.value)} className="w-full p-2 rounded bg-gray-800 border border-gray-700" />
-        </div>
-      </div>
-
-      <button onClick={handleHealth} disabled={loading} className="bg-slate-600 hover:bg-slate-700 px-4 py-2 rounded">
-        🔌 Testar conexão
-      </button>
-
-      <hr className="border-gray-700" />
-
-      {/* Telegram */}
-      <div>
-        <h3 className="text-xl font-semibold mb-3">Controle do Bot Telegram</h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div>
-            <label className="block mb-2">Token Telegram (Opcional)</label>
-            <input value={telegramToken} onChange={e => setTelegramToken(e.target.value)} className="w-full p-2 rounded bg-gray-800 border border-gray-700" />
-          </div>
-          <div>
-            <label className="block mb-2">Chat ID Telegram</label>
-            <input value={chatId} onChange={e => setChatId(e.target.value)} className="w-full p-2 rounded bg-gray-800 border border-gray-700" />
-          </div>
-        </div>
-        <div className="flex gap-3 mt-3">
-          <button onClick={handleSave} disabled={loading} className="bg-green-600 hover:bg-green-700 px-4 py-2 rounded">💾 Salvar Configuração</button>
-          <button onClick={() => handleToggleBot(true)} className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded">🟢 Ativar Bot</button>
-          <button onClick={() => handleToggleBot(false)} className="bg-red-600 hover:bg-red-700 px-4 py-2 rounded">🔴 Desativar Bot</button>
-        </div>
-      </div>
-
-      <hr className="border-gray-700" />
-
-      {/* Teste TwelveData */}
-      <div>
-        <h3 className="text-xl font-semibold mb-3">Testar Análise EUR/USD (TwelveData)</h3>
-        <button onClick={handleTestAnalysis} disabled={loading} className="bg-yellow-600 hover:bg-yellow-700 px-4 py-2 rounded w-full">
-          ⚡ Testar Análise com Dados Reais
+      {/* STATUS DE CONEXÃO */}
+      <div className="bg-gray-900 p-4 rounded-xl mb-5">
+        <h2 className="text-xl mb-2 text-yellow-300 font-semibold">
+          Status da Conexão:
+        </h2>
+        <p>{status}</p>
+        <button
+          onClick={testarConexao}
+          disabled={loading}
+          className="mt-3 px-4 py-2 bg-yellow-500 text-black font-bold rounded hover:bg-yellow-400"
+        >
+          {loading ? "Testando..." : "Testar Conexão com Railway"}
         </button>
       </div>
 
-      {message && <p className="mt-2 text-green-400">{message}</p>}
-      {error && <p className="mt-2 text-red-400">{error}</p>}
+      {/* CONTROLE DO BOT TELEGRAM */}
+      <div className="bg-gray-900 p-4 rounded-xl mb-5">
+        <h2 className="text-xl mb-2 text-yellow-300 font-semibold">
+          Controle do Bot Telegram
+        </h2>
+        <button
+          onClick={alternarBot}
+          className={`px-4 py-2 font-bold rounded ${
+            botStatus
+              ? "bg-red-600 hover:bg-red-500"
+              : "bg-green-500 hover:bg-green-400"
+          }`}
+        >
+          {botStatus ? "Desativar Bot" : "Ativar Bot"}
+        </button>
+      </div>
+
+      {/* TESTE TWELVEDATA */}
+      <div className="bg-gray-900 p-4 rounded-xl mb-5">
+        <h2 className="text-xl mb-2 text-yellow-300 font-semibold">
+          Testar Análise EUR/USD (TwelveData)
+        </h2>
+        <button
+          onClick={testarAnalise}
+          disabled={loading}
+          className="mt-3 px-4 py-2 bg-yellow-500 text-black font-bold rounded hover:bg-yellow-400"
+        >
+          {loading ? "Carregando..." : "Testar Análise com Dados Reais"}
+        </button>
+      </div>
+
+      {/* RESULTADO DO SINAL */}
+      {signal && (
+        <div className="bg-gray-800 p-4 rounded-xl border border-yellow-600">
+          <h3 className="text-lg font-semibold text-yellow-400 mb-2">
+            Último Sinal Detectado:
+          </h3>
+          <p>
+            <strong>Ativo:</strong> {signal.ativo} <br />
+            <strong>Sinal:</strong> {signal.sinal} <br />
+            <strong>Confiança:</strong> {signal.confiança}%
+          </p>
+        </div>
+      )}
     </div>
   );
 }
-
