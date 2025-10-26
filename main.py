@@ -1,145 +1,150 @@
-# ==============================================
-# IA DO IMPERADOR - BACKEND FASTAPI
-# TwelveData + Telegram + Railway (Deploy)
-# ==============================================
-
-from fastapi import FastAPI, BackgroundTasks
+import os
+import time
+import threading
+import requests
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-import requests, os, random, time
+from pydantic import BaseModel
 from dotenv import load_dotenv
-from threading import Thread
+from datetime import datetime
 
-# Carregar variáveis do ambiente Railway (.env)
+# ==============================
+# CONFIGURAÇÕES INICIAIS
+# ==============================
 load_dotenv()
 
-# -----------------------------
-# VARIÁVEIS DE AMBIENTE
-# -----------------------------
-API_KEY = os.getenv("API_KEY", "imperadorvip-secure-key-2025")
-TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-BOT_ACTIVE = os.getenv("BOT_ACTIVE", "false").lower() == "true"
+app = FastAPI(title="IA do Imperador 4.0")
 
-# Ativos suportados pela TwelveData
-ATIVOS = [
-    "EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "NZD/USD", "USD/CAD",
-    "EUR/JPY", "GBP/JPY", "EUR/GBP", "AUD/JPY", "EUR/CAD", "GBP/CAD", "NZD/JPY",
-    "EUR/NZD", "USD/ZAR", "USD/TRY", "USD/BRL", "USD/MXN", "USD/INR"
-]
-
-# Criar app FastAPI
-app = FastAPI(
-    title="IA do Imperador API",
-    description="Servidor Railway + TwelveData + Telegram",
-    version="4.0"
-)
-
-# Permitir requisições de qualquer origem (Base44)
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# -----------------------------
-# FUNÇÕES AUXILIARES
-# -----------------------------
+# Variáveis de ambiente
+TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("ID_DE_CHAT_DO_TELEGRAM")
+BOT_ACTIVE = False  # inicia desativado
 
-def obter_dados_twelvedata(symbol: str):
-    """Consulta dados em tempo real da TwelveData"""
-    try:
-        url = f"https://api.twelvedata.com/quote?symbol={symbol}&apikey={TWELVEDATA_API_KEY}"
-        r = requests.get(url, timeout=10)
-        data = r.json()
-        if "price" not in data:
-            return None
-        preco = float(data["price"])
-        variacao = float(data.get("percent_change", 0))
-        direcao = "CALL" if variacao > 0 else "PUT"
-        confianca = round(min(100, abs(variacao) * 10 + random.uniform(85, 99)), 2)
-        return {"ativo": symbol, "sinal": direcao, "confiança": confianca}
-    except Exception as e:
-        print(f"Erro ao consultar {symbol}: {e}")
-        return None
+# ==============================
+# MODELO BASE
+# ==============================
+class BotStatus(BaseModel):
+    ativo: bool
 
-
-def enviar_telegram(msg: str):
-    """Envia mensagem no Telegram"""
-    try:
-        if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-            payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
-            requests.post(url, data=payload)
-    except Exception as e:
-        print(f"Erro ao enviar mensagem: {e}")
-
-
+# ==============================
+# FUNÇÃO DE GERAÇÃO DE SINAIS
+# ==============================
 def gerar_sinal():
-    """Gera sinal com base na confiança mínima (>=90%)"""
-    for ativo in ATIVOS:
-        resultado = obter_dados_twelvedata(ativo)
-        if resultado and resultado["confiança"] >= 90:
-            return resultado
-    return None
+    """Consulta ativos da TwelveData e gera sinal aleatório com confiança"""
+    try:
+        # Lista de ativos (pares de moedas e índices principais)
+        ativos = [
+            "EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "USD/CAD", "AUD/USD",
+            "NZD/USD", "EUR/JPY", "GBP/JPY", "EUR/GBP", "EUR/CHF", "AUD/JPY",
+            "CAD/JPY", "NZD/JPY", "CHF/JPY", "EUR/CAD", "GBP/CAD", "AUD/CAD",
+            "BTC/USD", "ETH/USD", "XAU/USD", "XAG/USD"
+        ]
 
+        # Escolhe ativo atual (exemplo rotativo)
+        ativo = ativos[int(datetime.utcnow().minute) % len(ativos)]
 
-# -----------------------------
-# ROTAS PRINCIPAIS
-# -----------------------------
+        url = f"https://api.twelvedata.com/quote?symbol={ativo}&apikey={TWELVEDATA_API_KEY}"
+        r = requests.get(url)
+        data = r.json()
 
-@app.get("/")
-def raiz():
-    return {"status": "online", "projeto": "IA do Imperador 4.0"}
+        if "close" not in data:
+            return None
 
+        # Exemplo de cálculo simples de confiança
+        close = float(data["close"])
+        open_price = float(data.get("open", close))
+        variacao = ((close - open_price) / open_price) * 100
+        confianca = min(abs(variacao) * 50, 100)
+
+        if variacao > 0:
+            sinal = "CALL"
+        elif variacao < 0:
+            sinal = "PUT"
+        else:
+            sinal = "NEUTRO"
+
+        return {"ativo": ativo, "sinal": sinal, "confianca": round(confianca, 2)}
+
+    except Exception as e:
+        return {"erro": str(e)}
+
+# ==============================
+# ROTA: ANALISAR SINAL AO VIVO
+# ==============================
 @app.get("/signal/live")
 def sinal_live():
-    """Retorna sinal ao front-end (Base44)"""
-    try:
-        sinal = gerar_sinal()
-        if not sinal:
-            return {"detail": "Nenhum sinal disponível ainda"}
-        return {"status": "ok", "sinal": sinal}
-    except Exception as e:
-        return {"detail": f"Erro interno: {str(e)}"}
+    sinal = gerar_sinal()
+    if not sinal:
+        return {"detail": "Nenhum sinal disponível ainda"}
+    return {"status": "ok", "sinal": sinal}
 
+# ==============================
+# ROTA: ATIVAR/DESATIVAR BOT
+# ==============================
 @app.post("/bot/status")
-def alternar_bot(body: dict):
+def alternar_bot(status: BotStatus):
     """Ativa/Desativa bot de envio automático"""
     global BOT_ACTIVE
-    BOT_ACTIVE = body.get("ativo", False)
+    BOT_ACTIVE = status.ativo
     return {"bot_status": BOT_ACTIVE, "msg": "Bot atualizado com sucesso"}
 
-# -----------------------------
-# LOOP AUTOMÁTICO DO BOT
-# -----------------------------
+# ==============================
+# FUNÇÃO: ENVIAR PARA TELEGRAM
+# ==============================
+def enviar_telegram(msg):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}
+        requests.post(url, data=payload)
+    except Exception as e:
+        print(f"Erro Telegram: {e}")
 
+# ==============================
+# LOOP AUTOMÁTICO (A CADA 5 MIN)
+# ==============================
 def ciclo_automatico():
-    """Executa a cada 5 minutos"""
+    global BOT_ACTIVE
     while True:
         if BOT_ACTIVE:
             sinal = gerar_sinal()
-            if sinal:
+            if sinal and sinal["confianca"] >= 90:
                 msg = (
-                    f"📡 *IA do Imperador 4.0*\n\n"
-                    f"Ativo: {sinal['ativo']}\n"
-                    f"Sinal: {sinal['sinal']}\n"
-                    f"Confiança: {sinal['confiança']}%\n\n"
-                    f"#imperador #sinaisbinarios"
+                    f"🤖 <b>IA do Imperador 4.0</b>\n\n"
+                    f"💱 <b>Ativo:</b> {sinal['ativo']}\n"
+                    f"📈 <b>Sinal:</b> {sinal['sinal']}\n"
+                    f"🎯 <b>Confiança:</b> {sinal['confianca']}%\n"
+                    f"🕒 {datetime.now().strftime('%H:%M:%S')}\n"
                 )
                 enviar_telegram(msg)
+                print(f"Sinal enviado: {sinal}")
+            else:
+                print("Sem sinal acima de 90%")
         time.sleep(300)  # 5 minutos
 
-# Thread do bot
-Thread(target=ciclo_automatico, daemon=True).start()
+# ==============================
+# THREAD DE LOOP
+# ==============================
+def iniciar_loop():
+    t = threading.Thread(target=ciclo_automatico, daemon=True)
+    t.start()
 
-# -----------------------------
-# EXECUÇÃO LOCAL (para debug)
-# -----------------------------
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
+@app.on_event("startup")
+def startup_event():
+    print("🚀 IA do Imperador iniciada com sucesso")
+    iniciar_loop()
 
-
+# ==============================
+# ROTA PRINCIPAL
+# ==============================
+@app.get("/")
+def root():
+    return {"status": "online", "bot": BOT_ACTIVE, "hora": datetime.now().strftime("%H:%M:%S")}
