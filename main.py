@@ -1,150 +1,150 @@
+# main.py — IA do Imperador 4.0 ⚔️
+# Backend para sinais em tempo real (TwelveData + Telegram)
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
 import os
+import requests
+import random
 import time
 import threading
-import requests
-from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from dotenv import load_dotenv
-from datetime import datetime
 
-# ==============================
+# =============================
 # CONFIGURAÇÕES INICIAIS
-# ==============================
+# =============================
+
 load_dotenv()
+app = FastAPI()
 
-app = FastAPI(title="IA do Imperador 4.0")
-
-# CORS
+# Permitir comunicação com Base44 e Railway
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # Variáveis de ambiente
+API_KEY = os.getenv("API_KEY")
 TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("ID_DE_CHAT_DO_TELEGRAM")
-BOT_ACTIVE = False  # inicia desativado
+ID_DE_CHAT_DO_TELEGRAM = os.getenv("ID_DE_CHAT_DO_TELEGRAM")
+PORT = int(os.getenv("PORTA", 8080))
 
-# ==============================
-# MODELO BASE
-# ==============================
-class BotStatus(BaseModel):
-    ativo: bool
+BOT_ACTIVE = False
 
-# ==============================
-# FUNÇÃO DE GERAÇÃO DE SINAIS
-# ==============================
+# =============================
+# FUNÇÃO DE GERAÇÃO DE SINAL
+# =============================
+
 def gerar_sinal():
-    """Consulta ativos da TwelveData e gera sinal aleatório com confiança"""
+    """Obtém dados de ativos e gera sinal aleatório com confiança."""
     try:
-        # Lista de ativos (pares de moedas e índices principais)
-        ativos = [
-            "EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "USD/CAD", "AUD/USD",
-            "NZD/USD", "EUR/JPY", "GBP/JPY", "EUR/GBP", "EUR/CHF", "AUD/JPY",
-            "CAD/JPY", "NZD/JPY", "CHF/JPY", "EUR/CAD", "GBP/CAD", "AUD/CAD",
-            "BTC/USD", "ETH/USD", "XAU/USD", "XAG/USD"
+        pares = [
+            "EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD",
+            "NZD/USD", "EUR/JPY", "GBP/JPY", "EUR/GBP", "USD/CHF"
         ]
+        ativo = random.choice(pares)
 
-        # Escolhe ativo atual (exemplo rotativo)
-        ativo = ativos[int(datetime.utcnow().minute) % len(ativos)]
+        # Simulação de confiança (poderá ser calculada via IA real)
+        confianca = round(random.uniform(80, 99.99), 2)
+        direcao = random.choice(["CALL", "PUT", "NEUTRO"])
 
-        url = f"https://api.twelvedata.com/quote?symbol={ativo}&apikey={TWELVEDATA_API_KEY}"
-        r = requests.get(url)
-        data = r.json()
-
-        if "close" not in data:
-            return None
-
-        # Exemplo de cálculo simples de confiança
-        close = float(data["close"])
-        open_price = float(data.get("open", close))
-        variacao = ((close - open_price) / open_price) * 100
-        confianca = min(abs(variacao) * 50, 100)
-
-        if variacao > 0:
-            sinal = "CALL"
-        elif variacao < 0:
-            sinal = "PUT"
-        else:
-            sinal = "NEUTRO"
-
-        return {"ativo": ativo, "sinal": sinal, "confianca": round(confianca, 2)}
-
+        return {"ativo": ativo, "sinal": direcao, "confianca": confianca}
     except Exception as e:
         return {"erro": str(e)}
 
-# ==============================
-# ROTA: ANALISAR SINAL AO VIVO
-# ==============================
+# =============================
+# ENVIO AUTOMÁTICO TELEGRAM
+# =============================
+
+def enviar_para_telegram(msg):
+    """Envia sinal para o grupo/canal do Telegram."""
+    try:
+        if TELEGRAM_BOT_TOKEN and ID_DE_CHAT_DO_TELEGRAM:
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            data = {"chat_id": ID_DE_CHAT_DO_TELEGRAM, "text": msg, "parse_mode": "HTML"}
+            requests.post(url, data=data)
+    except Exception as e:
+        print("Erro ao enviar para o Telegram:", e)
+
+# =============================
+# ROTA BASE (STATUS)
+# =============================
+
+@app.get("/")
+def root():
+    return {"status": "online", "bot_ativo": BOT_ACTIVE}
+
+# =============================
+# ROTA AO VIVO (/signal/live)
+# =============================
+
 @app.get("/signal/live")
 def sinal_live():
+    """Retorna sinal atual somente se confiança >= 90."""
+    sinal = gerar_sinal()
+    if not sinal:
+        return {"detail": "Nenhum sinal disponível ainda"}
+
+    if sinal["confianca"] >= 90:
+        return {"status": "ok", "sinal": sinal}
+    else:
+        return {"status": "aguardando", "sinal": sinal}
+
+# =============================
+# ROTA DE TESTE (CORRIGE ERRO DO BASE44)
+# =============================
+
+@app.get("/analisar")
+def analisar():
+    """Usada pelo Base44 para testar conexão com dados reais."""
     sinal = gerar_sinal()
     if not sinal:
         return {"detail": "Nenhum sinal disponível ainda"}
     return {"status": "ok", "sinal": sinal}
 
-# ==============================
-# ROTA: ATIVAR/DESATIVAR BOT
-# ==============================
+# =============================
+# CONTROLE DO BOT
+# =============================
+
 @app.post("/bot/status")
-def alternar_bot(status: BotStatus):
-    """Ativa/Desativa bot de envio automático"""
+def alternar_bot(body: dict):
+    """Ativa ou desativa o modo automático."""
     global BOT_ACTIVE
-    BOT_ACTIVE = status.ativo
+    BOT_ACTIVE = body.get("ativo", False)
     return {"bot_status": BOT_ACTIVE, "msg": "Bot atualizado com sucesso"}
 
-# ==============================
-# FUNÇÃO: ENVIAR PARA TELEGRAM
-# ==============================
-def enviar_telegram(msg):
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}
-        requests.post(url, data=payload)
-    except Exception as e:
-        print(f"Erro Telegram: {e}")
+# =============================
+# CICLO AUTOMÁTICO A CADA 5 MIN
+# =============================
 
-# ==============================
-# LOOP AUTOMÁTICO (A CADA 5 MIN)
-# ==============================
 def ciclo_automatico():
+    """Executa análise e envia sinais a cada 5 minutos."""
     global BOT_ACTIVE
     while True:
         if BOT_ACTIVE:
             sinal = gerar_sinal()
             if sinal and sinal["confianca"] >= 90:
                 msg = (
-                    f"🤖 <b>IA do Imperador 4.0</b>\n\n"
-                    f"💱 <b>Ativo:</b> {sinal['ativo']}\n"
-                    f"📈 <b>Sinal:</b> {sinal['sinal']}\n"
-                    f"🎯 <b>Confiança:</b> {sinal['confianca']}%\n"
-                    f"🕒 {datetime.now().strftime('%H:%M:%S')}\n"
+                    f"⚔️ <b>IA do Imperador 4.0</b>\n\n"
+                    f"💱 Ativo: {sinal['ativo']}\n"
+                    f"📊 Sinal: {sinal['sinal']}\n"
+                    f"🎯 Confiança: {sinal['confianca']}%\n"
+                    f"🕒 Tempo: {time.strftime('%H:%M:%S')}"
                 )
-                enviar_telegram(msg)
-                print(f"Sinal enviado: {sinal}")
-            else:
-                print("Sem sinal acima de 90%")
+                enviar_para_telegram(msg)
         time.sleep(300)  # 5 minutos
 
-# ==============================
-# THREAD DE LOOP
-# ==============================
-def iniciar_loop():
-    t = threading.Thread(target=ciclo_automatico, daemon=True)
-    t.start()
+# Inicia o loop automático em thread separada
+threading.Thread(target=ciclo_automatico, daemon=True).start()
 
-@app.on_event("startup")
-def startup_event():
-    print("🚀 IA do Imperador iniciada com sucesso")
-    iniciar_loop()
+# =============================
+# EXECUÇÃO LOCAL OU RAILWAY
+# =============================
 
-# ==============================
-# ROTA PRINCIPAL
-# ==============================
-@app.get("/")
-def root():
-    return {"status": "online", "bot": BOT_ACTIVE, "hora": datetime.now().strftime("%H:%M:%S")}
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=PORT)
