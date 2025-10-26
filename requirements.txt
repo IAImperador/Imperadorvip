@@ -1,11 +1,29 @@
-fastapi
-uvicorn
-requests
-python-dotenv
+# Framework principal
 fastapi==0.115.0
 uvicorn==0.30.0
+
+# Requisições HTTP
+requests==2.31.0
 httpx==0.27.2
-pandas==2.2.3
-numpy==2.1.1
+
+# Variáveis de ambiente
 python-dotenv==1.0.1
+
+# Manipulação de dados e análises
+pandas==2.2.3
+numpy==1.26.4
+
+# Tipagem e validação de modelos
 pydantic==2.9.2
+
+# Criptografia / Segurança (opcional, útil para tokens)
+cryptography==42.0.8
+
+# Controle assíncrono e WebSocket (caso futuro)
+websockets==12.0
+
+# Controle de CORS e middleware
+starlette==0.38.2
+
+# Para o agendador de tarefas e rotas vivas
+apscheduler==3.10.4
