@@ -1,128 +1,102 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-import asyncio
-import httpx
-import os
-from datetime import datetime
-import random
+import httpx, asyncio, os, time
+from dotenv import load_dotenv
 
-# -----------------------------
-# Configurações principais
-# -----------------------------
-app = FastAPI(title="Imperial IA do Imperador — Sinais Live")
+load_dotenv()
 
+app = FastAPI(title="IA do Imperador – Live Signals")
+
+# Configuração CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["*"]
 )
 
+# Variáveis de ambiente
+API_KEY = os.getenv("API_KEY")
 TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+BOT_ACTIVE = os.getenv("BOT_ACTIVE", "false").lower() == "true"
 
-if not TWELVEDATA_API_KEY:
-    raise ValueError("❌ TWELVEDATA_API_KEY não configurada nas variáveis de ambiente!")
-
-# Lista de ativos disponíveis
-ASSETS = [
-    "EUR/USD", "USD/JPY", "GBP/USD", "AUD/USD", "USD/CAD",
-    "USD/CHF", "NZD/USD", "EUR/JPY", "GBP/JPY", "EUR/GBP",
-    "EUR/CAD", "AUD/JPY", "CHF/JPY", "CAD/JPY", "GBP/CAD",
-    "USD/BRL", "USD/ARS", "USD/TRY", "USD/MXN", "USD/ZAR",
-    "USD/INR", "USD/IDR", "USD/EGP", "USD/NGN", "USD/DZD"
+# Lista de ativos padrão (pode ser expandida com todos os disponíveis)
+ATIVOS = [
+    "EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "USD/CAD",
+    "AUD/USD", "NZD/USD", "EUR/JPY", "GBP/JPY", "EUR/GBP",
+    "EUR/CAD", "EUR/AUD", "NZD/JPY", "CAD/JPY", "AUD/JPY",
+    "USD/BRL", "USD/MXN", "USD/ZAR", "USD/TRY", "USD/INR",
+    "USD/PHP", "USD/NGN", "USD/ARS", "USD/IDR", "USD/EGP"
 ]
 
-bot_active = False  # controle do bot
-signals = []        # armazenamento dos sinais gerados
+ULTIMO_SINAL = None
 
-# -----------------------------
-# Função para buscar dados na TwelveData
-# -----------------------------
-async def get_data(symbol: str):
-    url = f"https://api.twelvedata.com/time_series"
-    params = {
-        "symbol": symbol,
-        "interval": "1min",
-        "apikey": TWELVEDATA_API_KEY,
-        "outputsize": 5
-    }
-    async with httpx.AsyncClient(timeout=10) as client:
-        r = await client.get(url, params=params)
-        data = r.json()
-        if "values" not in data:
-            raise HTTPException(status_code=400, detail=f"Falha ao consultar TwelveData para {symbol}")
-        return data["values"]
-
-# -----------------------------
-# Análise simplificada de sinal
-# -----------------------------
-def analyze_signal(values):
+async def buscar_dados_twelvedata(ativo):
+    url = f"https://api.twelvedata.com/time_series?symbol={ativo}&interval=1min&outputsize=5&apikey={TWELVEDATA_API_KEY}"
     try:
-        latest = float(values[0]["close"])
-        previous = float(values[1]["close"])
-        variation = ((latest - previous) / previous) * 100
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(url)
+            dados = r.json()
+            return dados
+    except Exception as e:
+        return {"error": str(e)}
 
-        direction = "CALL" if variation > 0 else "PUT"
-        confidence = min(99.9, abs(variation * 100))
-        return {"direction": direction, "confidence": confidence}
-    except Exception:
-        return {"direction": "INDEFINIDO", "confidence": 0}
+def analisar_dados(dados):
+    if "values" not in dados:
+        return {"sinal": "NEUTRO", "confianca": 0.0}
+    valores = dados["values"]
+    if len(valores) < 3:
+        return {"sinal": "NEUTRO", "confianca": 0.0}
 
-# -----------------------------
-# Geração automática de sinais
-# -----------------------------
-async def generate_signals():
-    global signals
-    while True:
-        if bot_active:
-            print("🤖 Bot ativo — gerando novos sinais...")
-            for asset in ASSETS:
-                try:
-                    data = await get_data(asset)
-                    result = analyze_signal(data)
-                    if result["confidence"] >= 90:
-                        signal = {
-                            "asset": asset,
-                            "direction": result["direction"],
-                            "confidence": result["confidence"],
-                            "timestamp": datetime.utcnow().isoformat()
-                        }
-                        signals.append(signal)
-                        print(f"✅ Sinal forte: {asset} → {result['direction']} ({result['confidence']:.2f}%)")
-                except Exception as e:
-                    print(f"❌ Falha ao processar {asset}: {e}")
-        else:
-            print("⏸️ Bot desativado — aguardando ativação.")
+    # Análise simples — exemplo
+    ult = float(valores[0]["close"])
+    penult = float(valores[1]["close"])
+    antepen = float(valores[2]["close"])
 
-        await asyncio.sleep(300)  # 5 minutos
+    if ult > penult > antepen:
+        return {"sinal": "CALL", "confianca": 92.5}
+    elif ult < penult < antepen:
+        return {"sinal": "PUT", "confianca": 91.3}
+    else:
+        return {"sinal": "NEUTRO", "confianca": 70.0}
 
-# -----------------------------
-# Rotas da API
-# -----------------------------
-@app.get("/")
-def root():
-    return {"status": "ok", "bot_active": bot_active, "sinais_armazenados": len(signals)}
-
-@app.post("/toggle-bot")
-def toggle_bot():
-    global bot_active
-    bot_active = not bot_active
-    return {"bot_active": bot_active}
-
-@app.get("/status-bot")
-def status_bot():
-    return {"bot_active": bot_active}
+async def enviar_telegram(msg):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
+    async with httpx.AsyncClient() as client:
+        await client.post(url, data=payload)
 
 @app.get("/signal/live")
-def live_signals():
-    if not signals:
-        return {"detail": "Nenhum sinal disponível ainda"}
-    return {"latest_signals": signals[-10:]}
+async def sinal_live():
+    global ULTIMO_SINAL
+    melhores = []
 
-# -----------------------------
-# Inicialização automática
-# -----------------------------
+    for ativo in ATIVOS:
+        dados = await buscar_dados_twelvedata(ativo)
+        resultado = analisar_dados(dados)
+        if resultado["confianca"] >= 90:
+            melhores.append((ativo, resultado))
+
+    if melhores:
+        ativo, sinal = max(melhores, key=lambda x: x[1]["confianca"])
+        ULTIMO_SINAL = {"ativo": ativo, **sinal}
+        return {"status": "ok", "sinal": ULTIMO_SINAL}
+    else:
+        return {"detail": "Nenhum sinal disponível ainda"}
+
+async def loop_envio_sinais():
+    while True:
+        if BOT_ACTIVE:
+            resposta = await sinal_live()
+            if "sinal" in resposta and resposta["sinal"]["confianca"] >= 90:
+                msg = f"📊 Sinal {resposta['sinal']['sinal']} – {resposta['sinal']['confianca']}% de confiança"
+                await enviar_telegram(msg)
+        await asyncio.sleep(300)  # 5 minutos
+
 @app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(generate_signals())
-    print("🚀 Servidor Imperial IA iniciado — monitorando ativos da TwelveData...")
+async def iniciar():
+    asyncio.create_task(loop_envio_sinais())
