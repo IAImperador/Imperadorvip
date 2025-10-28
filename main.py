@@ -3,15 +3,15 @@ from fastapi.middleware.cors import CORSMiddleware
 import os
 import requests
 import time
+import threading
 from dotenv import load_dotenv
 
+# =====================================================
+# 🔧 CONFIGURAÇÃO INICIAL
+# =====================================================
 load_dotenv()
+app = FastAPI(title="ImperadorVIP AI", version="5.0")
 
-app = FastAPI(title="ImperadorVIP Signals API", version="4.0")
-
-# =====================================================
-# 🔥 CONFIGURAÇÃO CORS (Permite conexão com Base44)
-# =====================================================
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -28,45 +28,45 @@ app.add_middleware(
 )
 
 # =====================================================
-# 🌍 VARIÁVEIS E ESTADO GLOBAL
+# 🌍 VARIÁVEIS DE AMBIENTE
 # =====================================================
-BOT_ACTIVE = False
-LAST_SIGNAL = {}
-
 TWELVEDATA_KEY = os.getenv("TWELVEDATA_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
+BOT_ACTIVE = False
+LAST_SIGNAL = {}
+
 # =====================================================
-# 🩺 ROTAS DE STATUS
+# 🩺 STATUS BÁSICO
 # =====================================================
 @app.get("/")
-def home():
-    return {"status": "ok", "service": "ImperadorVIP Signals API", "time": time.strftime("%Y-%m-%dT%H:%M:%S")}
-
-@app.get("/health")
-def health_check():
-    return {"status": "ok", "msg": "API funcional e operante."}
+def root():
+    return {
+        "status": "ok",
+        "service": "ImperadorVIP",
+        "bot_active": BOT_ACTIVE,
+        "time": time.strftime("%Y-%m-%d %H:%M:%S")
+    }
 
 # =====================================================
-# 🤖 BOT STATUS
+# 🤖 BOT - ATIVAR / DESATIVAR
 # =====================================================
-@app.post("/bot/status")
-def alternar_bot(data: dict = Body(...)):
-    """Ativa ou desativa o bot de envio automático"""
+@app.post("/bot/toggle")
+def toggle_bot(data: dict = Body(...)):
     global BOT_ACTIVE
-    BOT_ACTIVE = data.get("ativo", False)
-    return {"status": "ok", "bot_ativo": BOT_ACTIVE, "mensagem": "Bot atualizado com sucesso"}
+    BOT_ACTIVE = bool(data.get("active", False))
+    return {"status": "ok", "bot_active": BOT_ACTIVE, "message": "Bot status atualizado com sucesso"}
 
 @app.get("/bot/status")
-def verificar_bot():
-    return {"status": "ok", "bot_ativo": BOT_ACTIVE}
+def bot_status():
+    return {"status": "ok", "bot_active": BOT_ACTIVE}
 
 # =====================================================
-# 📊 ANALISADOR DE SINAIS EM TEMPO REAL
+# 📈 FUNÇÃO DE ANÁLISE DE MERCADO (SINAIS)
 # =====================================================
 @app.post("/analyze")
-def analisar(data: dict = Body(...)):
+def analyze(data: dict = Body(...)):
     try:
         if not TWELVEDATA_KEY:
             return {"detail": "Falta TWELVEDATA_KEY"}
@@ -74,55 +74,66 @@ def analisar(data: dict = Body(...)):
         symbol = data.get("symbol", "EUR/USD").replace("/", "")
         interval = data.get("interval", "1min")
 
-        url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize=30&apikey={TWELVEDATA_KEY}"
-        response = requests.get(url)
-        response.raise_for_status()
-        data_api = response.json()
+        url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize=20&apikey={TWELVEDATA_KEY}"
+        res = requests.get(url, timeout=10)
+        res.raise_for_status()
+        js = res.json()
 
-        if "values" not in data_api:
-            return {"detail": "Falha ao consultar TwelveData", "resposta": data_api}
+        if "values" not in js:
+            return {"detail": "Falha ao consultar TwelveData", "resposta": js}
 
-        values = data_api["values"]
-        close_prices = [float(v["close"]) for v in values[:5]]
+        values = js["values"]
+        closes = [float(v["close"]) for v in values[:5]]
 
-        direcao = "CALL" if close_prices[0] < close_prices[-1] else "PUT"
-        confianca = round(abs((close_prices[-1] - close_prices[0]) / close_prices[0]) * 100, 2)
+        trend = "CALL" if closes[-1] > closes[0] else "PUT"
+        confidence = round(abs((closes[-1] - closes[0]) / closes[0]) * 100, 2)
 
         LAST_SIGNAL.update({
-            "ativo": symbol,
-            "sinal": direcao,
-            "confianca": confianca,
+            "symbol": symbol,
+            "signal": trend,
+            "confidence": confidence,
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
         })
 
-        return {"status": "ok", "sinal": LAST_SIGNAL}
+        return {
+            "status": "ok",
+            "symbol": symbol,
+            "signal": trend,
+            "confidence": confidence,
+            "timestamp": LAST_SIGNAL["timestamp"]
+        }
 
     except Exception as e:
         return {"detail": f"Erro interno: {str(e)}"}
 
 # =====================================================
-# 🔁 ENVIO AUTOMÁTICO PARA TELEGRAM (a cada 5 minutos)
+# 🔁 ENVIO AUTOMÁTICO AO TELEGRAM (A CADA 5 MIN)
 # =====================================================
-import threading
-import time
-
-def enviar_para_telegram():
-    """Envia sinais automaticamente para o Telegram se o bot estiver ativo"""
+def auto_signal_sender():
     while True:
-        if BOT_ACTIVE and LAST_SIGNAL:
-            try:
-                msg = f"📈 Sinal IA do Imperador\nAtivo: {LAST_SIGNAL['ativo']}\nSinal: {LAST_SIGNAL['sinal']}\nConfiabilidade: {LAST_SIGNAL['confianca']}%"
-                url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-                payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
-                requests.post(url, data=payload)
-            except Exception as e:
-                print(f"Erro ao enviar para Telegram: {e}")
-        time.sleep(300)  # 5 minutos
+        try:
+            if BOT_ACTIVE and LAST_SIGNAL:
+                conf = LAST_SIGNAL.get("confidence", 0)
+                if conf >= 90:
+                    msg = (
+                        f"🤖 *IA do Imperador – Sinal Automático*\n\n"
+                        f"📊 Ativo: {LAST_SIGNAL['symbol']}\n"
+                        f"📈 Sinal: {LAST_SIGNAL['signal']}\n"
+                        f"🎯 Confiabilidade: {conf}%\n"
+                        f"🕒 Horário: {LAST_SIGNAL['timestamp']}"
+                    )
+                    requests.post(
+                        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                        data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}
+                    )
+            time.sleep(300)  # 5 minutos
+        except Exception as e:
+            print(f"Erro no loop Telegram: {e}")
 
-threading.Thread(target=enviar_para_telegram, daemon=True).start()
+threading.Thread(target=auto_signal_sender, daemon=True).start()
 
 # =====================================================
-# 🧩 EXECUÇÃO LOCAL (debug)
+# 🧩 EXECUÇÃO LOCAL
 # =====================================================
 if __name__ == "__main__":
     import uvicorn
