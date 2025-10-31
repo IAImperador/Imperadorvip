@@ -1,7 +1,17 @@
-FROM python:3.10-slim
+# Imagem base Python
+FROM python:3.11-slim
+
+# Define diretório
 WORKDIR /app
-COPY requisitos.txt .
-RUN pip install --no-cache-dir -r requisitos.txt
-COPY . .
+
+# Copia arquivos
+COPY . /app
+
+# Instala dependências
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Expõe porta
 EXPOSE 8080
+
+# Comando padrão
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
