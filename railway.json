@@ -1,8 +1,0 @@
-{
-  "build": { "builder": "NIXPACKS" },
-  "deploy": { "startCommand": "python app/main.py" },
-  "env": {
-    "PORT": "8080",
-    "PYTHONUNBUFFERED": "true"
-  }
-}
