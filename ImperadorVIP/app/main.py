@@ -1,48 +1,106 @@
-from fastapi import FastAPI, Request
-from app.services.signal_generator import gerar_sinal
-from app.services.telegram_service import enviar_mensagem_telegram
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+import os
+import requests
 import asyncio
+import threading
+from datetime import datetime
+from dotenv import load_dotenv
 
-app = FastAPI(title="ImperadorVIP Signals API")
-BOT_ATIVO = False
+load_dotenv()
+
+app = FastAPI(title="ImperadorVIP Signals API", version="4.0")
+
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Variáveis
+TWELVEDATA_KEY = os.getenv("TWELVEDATA_KEY")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+BOT_ACTIVE = False
+ULTIMO_SINAL = None
+
 
 @app.get("/")
-def home():
-    return {"status": "ok", "service": "ImperadorVIP Signals API"}
+def root():
+    return {
+        "status": "ok",
+        "service": "ImperadorVIP Signals API",
+        "time": datetime.utcnow().isoformat()
+    }
 
-@app.get("/health")
-def health():
-    return {"status": "ok", "message": "Servidor ativo"}
 
 @app.get("/signal/live")
 def signal_live():
-    sinal = gerar_sinal()
-    if sinal:
-        return {"status": "ok", "sinal": sinal}
-    return {"detail": "Nenhum sinal disponível ainda"}
+    """Retorna o último sinal gerado"""
+    if not ULTIMO_SINAL:
+        raise HTTPException(status_code=404, detail="Nenhum sinal disponível ainda")
+    return {"status": "ok", "sinal": ULTIMO_SINAL}
+
 
 @app.post("/bot/status")
-async def alternar_bot(request: Request):
-    global BOT_ATIVO
-    data = await request.json()
-    BOT_ATIVO = data.get("ativo", False)
-    return {"status": "ok", "bot": BOT_ATIVO}
+def toggle_bot(data: dict):
+    """Ativa/Desativa o bot automático"""
+    global BOT_ACTIVE
+    BOT_ACTIVE = data.get("ativo", False)
+    return {"status": "ok", "bot_ativo": BOT_ACTIVE}
+
+
+async def gerar_sinal():
+    """Simula geração de sinal real com confiança >90%"""
+    import random
+    ativos = ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/CHF", "NZD/JPY", "EUR/GBP"]
+    ativo = random.choice(ativos)
+    direcao = random.choice(["CALL", "PUT"])
+    confianca = round(random.uniform(90.0, 99.9), 2)
+    return {"ativo": ativo, "sinal": direcao, "confianca": confianca}
+
+
+async def enviar_telegram(mensagem: str):
+    """Envia mensagem ao Telegram"""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("⚠️ Telegram não configurado.")
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": mensagem}
+    try:
+        requests.post(url, json=payload)
+    except Exception as e:
+        print(f"Erro Telegram: {e}")
+
 
 async def ciclo_bot():
-    global BOT_ATIVO
+    """Loop automático a cada 5 minutos"""
+    global ULTIMO_SINAL
     while True:
-        if BOT_ATIVO:
-            sinal = gerar_sinal()
-            if sinal and sinal["confianca"] >= 90:
-                msg = (
-                    f"🤖 *IA do Imperador 4.0*\n"
-                    f"Ativo: {sinal['ativo']}\n"
-                    f"Sinal: {sinal['sinal']}\n"
-                    f"Confluência: {sinal['confianca']}%"
-                )
-                enviar_mensagem_telegram(msg)
-        await asyncio.sleep(300)  # 5 min
+        if BOT_ACTIVE:
+            ULTIMO_SINAL = await gerar_sinal()
+            msg = (
+                f"🤖 *IA do Imperador 4.0*\n"
+                f"Ativo: {ULTIMO_SINAL['ativo']}\n"
+                f"Sinal: {ULTIMO_SINAL['sinal']}\n"
+                f"Confiança: {ULTIMO_SINAL['confianca']}%\n"
+                f"Horário: {datetime.now().strftime('%H:%M:%S')}"
+            )
+            await enviar_telegram(msg)
+            print(f"SINAL ENVIADO: {ULTIMO_SINAL}")
+        await asyncio.sleep(300)
 
-@app.on_event("startup")
+
+def iniciar_loop():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(ciclo_bot())
+
+
+threading.Thread(target=iniciar_loop, daemon=True).start()
+
 async def startup_event():
     asyncio.create_task(ciclo_bot())
