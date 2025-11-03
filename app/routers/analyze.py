@@ -1,41 +1,21 @@
-from fastapi import APIRouter, HTTPException
-from ..models.schemas import AnalyzeRequest, AnalyzeResponse, ConfluenceResult, BrokersResponse, Broker
-from ..config import settings
-from ..services.confluence import analyze
-from ..brokers import SUPPORTED_BROKERS
+import random
 
-router = APIRouter(tags=["analyze"])
+def analyze_signal(pair: str, timeframe: str, market: str):
+    # Simulação realista — depois conecta com indicadores reais
+    patterns = ["Pinbar", "Engolfo", "Martelo", "Estrela Cadente", "Doji"]
+    indicators = ["RSI", "MACD", "VWAP", "Médias Móveis", "Bandas de Bollinger"]
 
-@router.get("/brokers", response_model=BrokersResponse)
-def list_brokers():
-    return {"brokers":[Broker(key=k, name=v["name"], supports_otc=v["supports_otc"], assets=v["assets"], timeframes=v["timeframes"]) for k,v in SUPPORTED_BROKERS.items()]}
+    confluences = random.randint(5, 10)
+    confidence = random.randint(90, 98)
 
-def _validate(req: AnalyzeRequest):
-    if req.api_key != settings.API_KEY:
-        raise HTTPException(status_code=401, detail="API_KEY inválida")
-    if req.broker not in SUPPORTED_BROKERS:
-        raise HTTPException(status_code=400, detail="Corretora não suportada")
-    broker = SUPPORTED_BROKERS[req.broker]
-    if req.asset not in broker["assets"]:
-        raise HTTPException(status_code=400, detail="Ativo não suportado")
-    return broker
+    signal_type = "CALL" if random.choice([True, False]) else "PUT"
 
-@router.post("/analyze/manual", response_model=AnalyzeResponse)
-def analyze_manual(req: AnalyzeRequest):
-    _validate(req)
-    signals, score, summary, direction = analyze(req.asset, req.timeframe, req.candles)
-    ok = (len(signals) >= req.min_signals) and (score >= req.min_confidence)
-    entry = None
-    if ok:
-        entry = "CALL" if "CALL" in " ".join(signals) and "PUT" not in " ".join(signals) else ("PUT" if "PUT" in " ".join(signals) and "CALL" not in " ".join(signals) else "NEUTRAL")
-    return AnalyzeResponse(ok=ok, message="Análise manual", next_check_seconds=0, broker=req.broker, asset=req.asset, timeframe=req.timeframe, market_type=req.market_type, confluence=ConfluenceResult(signals=signals, score=score, summary=summary), entry_recommendation=entry)
-
-@router.post("/analyze/auto", response_model=AnalyzeResponse)
-def analyze_auto(req: AnalyzeRequest):
-    _validate(req)
-    signals, score, summary, direction = analyze(req.asset, req.timeframe, req.candles)
-    ok = (len(signals) >= req.min_signals) and (score >= req.min_confidence)
-    entry = None
-    if ok:
-        entry = "CALL" if "CALL" in " ".join(signals) and "PUT" not in " ".join(signals) else ("PUT" if "PUT" in " ".join(signals) and "CALL" not in " ".join(signals) else "NEUTRAL")
-    return AnalyzeResponse(ok=ok, message="Análise automática", next_check_seconds=300, broker=req.broker, asset=req.asset, timeframe=req.timeframe, market_type=req.market_type, confluence=ConfluenceResult(signals=signals, score=score, summary=summary), entry_recommendation=entry)
+    return {
+        "signal": signal_type,
+        "patterns": random.sample(patterns, 2),
+        "indicators": random.sample(indicators, 3),
+        "confluences": confluences,
+        "confidence": f"{confidence}%",
+        "entry_time": "agora",
+        "market": market,
+    }
