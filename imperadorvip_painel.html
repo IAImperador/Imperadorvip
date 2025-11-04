@@ -1,0 +1,404 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>IA do Imperador — Painel de Sinais</title>
+<style>
+  :root{
+    --bg:#0b0d12; --panel:#10131a; --panel2:#0f1218; --text:#e9ecf1; --muted:#8e97a7;
+    --gold:#f5c451; --gold-2:#d6a63a; --ok:#15c380; --bad:#ff5d5d; --warn:#ffb020;
+    --chip:#171b24; --border:#1b2130;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:linear-gradient(180deg,#0a0c11 0%,#0c0f15 100%);
+    color:var(--text); font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  }
+  .wrap{max-width:1100px; margin:32px auto; padding:0 16px}
+  .top{
+    display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:18px;
+  }
+  h1{margin:0; font-size:28px; letter-spacing:.2px}
+  .brand{display:flex; align-items:center; gap:12px}
+  .crown{width:38px; height:38px; border-radius:12px; background:radial-gradient(60% 80% at 50% 20%, #ffd86b 0, #f0b949 45%, #cc9a2e 100%);
+    display:grid; place-items:center; box-shadow:0 10px 28px #000 inset, 0 0 0 1px #7e631d inset, 0 8px 24px rgba(0,0,0,.35);}
+  .crown:after{content:"👑"; font-size:20px; filter: drop-shadow(0 1px 0 #7a5c18);}
+  .badge{
+    font-size:12px; padding:6px 10px; border-radius:999px; background:linear-gradient(90deg,#1a2030,#141a26);
+    border:1px solid var(--border); color:var(--muted)
+  }
+  .grid{display:grid; grid-template-columns: 1.1fr .9fr; gap:16px}
+  @media (max-width:980px){ .grid{grid-template-columns:1fr} }
+
+  .card{
+    background:linear-gradient(180deg,var(--panel) 0,var(--panel2) 100%);
+    border:1px solid var(--border); border-radius:18px; padding:18px;
+    box-shadow:0 10px 24px rgba(0,0,0,.35);
+  }
+  .card h2{margin:0 0 10px; font-size:16px; font-weight:600; color:#f3f5f9; letter-spacing:.3px}
+  .hint{font-size:12px; color:var(--muted); margin:2px 0 10px}
+
+  .row{display:grid; grid-template-columns: repeat(12, 1fr); gap:10px}
+  .col-6{grid-column: span 6}
+  .col-4{grid-column: span 4}
+  .col-3{grid-column: span 3}
+  .col-8{grid-column: span 8}
+  @media (max-width:780px){
+    .row{grid-template-columns: 1fr}
+    .col-6,.col-4,.col-3,.col-8{grid-column: span 1}
+  }
+
+  label{font-size:12px; color:#b8c1d4; margin-bottom:6px; display:block}
+  select, input[type="number"], input[type="text"]{
+    width:100%; padding:12px 12px; border-radius:12px; background:#0d1118; color:var(--text);
+    border:1px solid #1b2232; outline:none; transition:.2s border;
+  }
+  select:focus, input:focus{border-color:#2a3750}
+
+  .switch{
+    display:inline-flex; gap:8px; align-items:center; padding:6px;
+    background:#0e131c; border:1px solid var(--border); border-radius:999px;
+  }
+  .switch button{
+    font-size:13px; padding:8px 14px; border-radius:999px; border:1px solid transparent;
+    background:transparent; color:var(--muted); cursor:pointer;
+  }
+  .switch button.active{
+    background:linear-gradient(180deg,#1b2232,#151b26);
+    color:var(--text); border-color:#28334a; box-shadow: 0 0 0 1px #2b3852 inset;
+  }
+
+  .btn{
+    width:100%; padding:13px 16px; border-radius:12px; border:1px solid #74591a;
+    background:linear-gradient(180deg,#f8d779,#d3a735);
+    color:#17140b; font-weight:700; letter-spacing:.3px; cursor:pointer;
+    box-shadow: 0 6px 18px rgba(245,196,81,.25);
+  }
+  .btn[disabled]{opacity:.55; cursor:not-allowed; filter:grayscale(.2)}
+  .btn-outline{
+    background:transparent; color:var(--gold); border:1px solid #3e2e0b;
+  }
+
+  .status{
+    display:flex; align-items:center; gap:10px; padding:10px 12px; border-radius:12px; background:#0e141d; border:1px solid var(--border)
+  }
+  .dot{width:10px;height:10px;border-radius:50%}
+  .ok{background:var(--ok)} .bad{background:var(--bad)} .warn{background:var(--warn)}
+  .mono{font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; color:#c6d2ea}
+
+  .pill{
+    display:inline-flex; gap:6px; align-items:center; padding:6px 10px; border-radius:999px;
+    background:#101724; border:1px solid #1e2a3f; color:#b8c1d4; font-size:12px
+  }
+  .list{display:flex; flex-direction:column; gap:8px; margin-top:8px}
+  .item{display:flex; justify-content:space-between; gap:12px; padding:10px 12px; border-radius:12px;
+        background:#0d121a; border:1px solid #1a2130; font-size:13px}
+  .muted{color:var(--muted)}
+  .small{font-size:12px}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div class="brand">
+        <div class="crown"></div>
+        <div>
+          <h1>IA do Imperador — Painel</h1>
+          <div class="badge">Leitura real • Confluências • OTC/Aberto • Manual/Automático</div>
+        </div>
+      </div>
+
+      <div class="switch" role="tablist" aria-label="Modo de Operação">
+        <button id="btnManual" class="active" aria-selected="true">Manual</button>
+        <button id="btnAuto">Automático (5 min)</button>
+      </div>
+    </div>
+
+    <div class="grid">
+      <!-- CONTROLES -->
+      <section class="card">
+        <h2>Configuração</h2>
+        <p class="hint">Selecione mercado, corretora e parâmetros. Em modo automático, a busca roda a cada 5 minutos.</p>
+
+        <div class="row">
+          <div class="col-4">
+            <label>Mercado</label>
+            <select id="market">
+              <option value="open">Mercado Aberto</option>
+              <option value="otc">OTC</option>
+            </select>
+          </div>
+
+          <div class="col-4">
+            <label>Corretora</label>
+            <select id="broker">
+              <option value="Avalon">Avalon</option>
+              <option value="IQOption">IQ Option</option>
+              <option value="Deriv">Deriv</option>
+              <option value="Quotex">Quotex</option>
+              <option value="Bullex">Bullex</option>
+              <option value="OkBroker">OkBroker</option>
+              <option value="CasaTrader">Casa Trader</option>
+              <!-- add as que quiser, o backend aceita essa string -->
+            </select>
+          </div>
+
+          <div class="col-4">
+            <label>Timeframe</label>
+            <select id="timeframe">
+              <option value="M1">M1</option>
+              <option value="M5" selected>M5</option>
+              <option value="M15">M15</option>
+              <option value="M30">M30</option>
+              <option value="H1">H1</option>
+            </select>
+          </div>
+
+          <div class="col-6">
+            <label>Ativo / Par</label>
+            <input id="symbol" type="text" placeholder="Ex.: EUR/USD, USD/BRL, GBP/JPY, PETR4, BTCUSD" />
+          </div>
+
+          <div class="col-3">
+            <label>Velas (janela)</label>
+            <select id="window">
+              <option value="5" selected>5</option>
+              <option value="10">10</option>
+              <option value="20">20</option>
+              <option value="50">50</option>
+            </select>
+          </div>
+
+          <div class="col-3">
+            <label>Mín. Confluências</label>
+            <select id="minConfs">
+              <option value="5">5</option>
+              <option value="6">6</option>
+              <option value="7">7</option>
+              <option value="8" selected>8</option>
+            </select>
+          </div>
+
+          <div class="col-6">
+            <label>Confiança mínima (%)</label>
+            <input id="minConfPct" type="number" min="70" max="100" step="1" value="90" />
+          </div>
+
+          <div class="col-6">
+            <label class="muted"> </label>
+            <button id="btnAnalyze" class="btn">⚡ Buscar Sinal Agora</button>
+          </div>
+        </div>
+
+        <div class="row" style="margin-top:10px">
+          <div class="col-6">
+            <button id="btnConnect" class="btn btn-outline">🔌 Conectar ao Railway</button>
+          </div>
+          <div class="col-6">
+            <div class="status" id="statusBox">
+              <div class="dot bad" id="dot"></div>
+              <div>
+                <div class="small"><b>Status:</b> <span id="statusText">Desconectado</span></div>
+                <div class="mono" id="baseUrl">https://imperadorvip-production.up.railway.app</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- RESULTADO / HISTÓRICO -->
+      <section class="card">
+        <h2>Último Sinal</h2>
+        <div class="list" id="lastSignalBox">
+          <div class="item">
+            <div class="muted">Ainda não há sinal. Clique em “Buscar Sinal Agora”.</div>
+          </div>
+        </div>
+
+        <h2 style="margin-top:16px">Histórico (sessão)</h2>
+        <div class="list" id="history"></div>
+      </section>
+    </div>
+
+    <section class="card" style="margin-top:16px">
+      <h2>Observações de Uso</h2>
+      <ul class="small muted">
+        <li>Modo <b>Automático</b> executa a análise a cada <b>5 minutos</b> (com base nas seleções do topo).</li>
+        <li>O painel envia <span class="pill"><span>header</span><span class="mono">x-api-key: imperadorvip-secure-key-2025</span></span> para autenticação.</li>
+        <li>Endpoints esperados no backend:
+          <span class="pill"><span>GET</span><span class="mono">/health</span></span>
+          <span class="pill"><span>POST</span><span class="mono">/analyze</span></span>
+        </li>
+      </ul>
+    </section>
+  </div>
+
+<script>
+(function(){
+  const BASE_URL = "https://imperadorvip-production.up.railway.app"; // pode trocar aqui se precisar
+  const API_KEY  = "imperadorvip-secure-key-2025"; // exposto no cliente — depois podemos mover para proxy
+
+  // UI refs
+  const el = {
+    btnManual:   document.getElementById('btnManual'),
+    btnAuto:     document.getElementById('btnAuto'),
+    btnAnalyze:  document.getElementById('btnAnalyze'),
+    btnConnect:  document.getElementById('btnConnect'),
+    statusText:  document.getElementById('statusText'),
+    dot:         document.getElementById('dot'),
+    lastSignal:  document.getElementById('lastSignalBox'),
+    history:     document.getElementById('history'),
+    market:      document.getElementById('market'),
+    broker:      document.getElementById('broker'),
+    timeframe:   document.getElementById('timeframe'),
+    symbol:      document.getElementById('symbol'),
+    window:      document.getElementById('window'),
+    minConfs:    document.getElementById('minConfs'),
+    minConfPct:  document.getElementById('minConfPct'),
+  };
+
+  let mode = 'manual'; // 'manual' | 'auto'
+  let autoTimer = null;
+
+  // --- helpers UI
+  function setStatus(ok, msg){
+    el.statusText.textContent = msg || (ok ? 'Conectado' : 'Desconectado');
+    el.dot.className = 'dot ' + (ok ? 'ok' : 'bad');
+  }
+  function pushHistory(sig){
+    const row = document.createElement('div');
+    row.className = 'item';
+    row.innerHTML = `
+      <div>
+        <div><b>${sig.symbol}</b> — ${sig.market.toUpperCase()} • ${sig.broker}</div>
+        <div class="small muted">${sig.timeframe} • conf.: <b>${sig.confidence}%</b> • confs: ${sig.confluences} • ${sig.strategy||'-'}</div>
+      </div>
+      <div style="text-align:right">
+        <div><b>${sig.direction || '-'}</b></div>
+        <div class="small muted">${new Date(sig.timestamp).toLocaleTimeString()}</div>
+      </div>`;
+    el.history.prepend(row);
+    // limita 20
+    while(el.history.children.length > 20) el.history.removeChild(el.history.lastChild);
+  }
+  function showLastSignal(sig){
+    el.lastSignal.innerHTML = '';
+    const row = document.createElement('div');
+    row.className = 'item';
+    row.innerHTML = `
+      <div>
+        <div style="font-size:15px"><b>${sig.symbol}</b> • ${sig.market.toUpperCase()} • ${sig.broker}</div>
+        <div class="small muted">Timeframe ${sig.timeframe} • Janelas ${sig.window} • Confluências ${sig.confluences} • Confiança <b>${sig.confidence}%</b></div>
+        <div class="small muted">Entrada: <b>${sig.entry_time || '-'}</b> • Preço: <b>${sig.price ?? '-'}</b></div>
+      </div>
+      <div style="text-align:right">
+        <div style="font-size:18px"><b>${sig.direction || '-'}</b></div>
+        <div class="small muted">${new Date(sig.timestamp).toLocaleString()}</div>
+      </div>`;
+    el.lastSignal.appendChild(row);
+  }
+
+  // --- backend calls
+  async function connect(){
+    setStatus(false, 'Conectando…');
+    try{
+      const r = await fetch(BASE_URL + '/health', {headers:{'x-api-key': API_KEY}});
+      if(!r.ok) throw new Error('HTTP '+r.status);
+      const j = await r.json().catch(()=>({ok:true}));
+      setStatus(true, 'Conectado');
+      return j;
+    }catch(err){
+      setStatus(false, 'Falha ao conectar');
+      console.error('health error', err);
+      return null;
+    }
+  }
+
+  async function analyzeOnce(){
+    const payload = {
+      mode: (mode === 'auto' ? 'automatic' : 'manual'),
+      market: el.market.value,          // 'otc' | 'open'
+      broker: el.broker.value,          // ex.: Avalon
+      symbol: (el.symbol.value||'').trim(), // ativo
+      timeframe: el.timeframe.value,    // M1/M5/…
+      window: Number(el.window.value),  // janelas
+      min_confluences: Number(el.minConfs.value),
+      min_confidence: Number(el.minConfPct.value), // 90
+      // flags de precisão alta
+      strict_patterns: true,
+      vwap_ma_rsi_macd: true
+    };
+    el.btnAnalyze.disabled = true; el.btnAnalyze.textContent = 'Analisando…';
+    try{
+      const r = await fetch(BASE_URL + '/analyze', {
+        method:'POST',
+        headers:{
+          'Content-Type':'application/json',
+          'x-api-key': API_KEY,
+        },
+        body: JSON.stringify(payload),
+      });
+      if(!r.ok) throw new Error('HTTP '+r.status);
+      const j = await r.json();
+
+      // formato esperado:
+      // { ok:true, signal:{ symbol, market, broker, timeframe, window, direction, confidence, confluences, entry_time, price, strategy, timestamp } }
+      const sig = j.signal || {};
+      sig.market = payload.market;
+      sig.broker = payload.broker;
+      sig.timeframe = payload.timeframe;
+      sig.window = payload.window;
+      sig.timestamp = sig.timestamp || Date.now();
+
+      showLastSignal(sig);
+      pushHistory(sig);
+
+      // feedback do botão
+      el.btnAnalyze.textContent = '✅ Sinal Gerado';
+      setTimeout(()=>{ el.btnAnalyze.textContent = '⚡ Buscar Sinal Agora'; el.btnAnalyze.disabled = false;}, 900);
+      return j;
+    }catch(err){
+      console.error('analyze error', err);
+      el.btnAnalyze.textContent = '❌ Falhou — Tentar Novamente';
+      el.btnAnalyze.disabled = false;
+      // mostra aviso no último sinal
+      el.lastSignal.innerHTML = `
+        <div class="item">
+          <div class="muted">Falha ao gerar sinal (verifique conexão e CORS).</div>
+          <div class="small muted">Detalhe: ${String(err.message||err)}</div>
+        </div>`;
+      return null;
+    }
+  }
+
+  // --- modo manual/auto
+  function setMode(next){
+    mode = next;
+    el.btnManual.classList.toggle('active', mode==='manual');
+    el.btnAuto.classList.toggle('active',   mode==='auto');
+
+    if(autoTimer){ clearInterval(autoTimer); autoTimer = null; }
+
+    if(mode==='auto'){
+      // dispara imediatamente e agenda a cada 5 minutos
+      analyzeOnce();
+      autoTimer = setInterval(analyzeOnce, 5*60*1000);
+    }
+  }
+
+  // events
+  el.btnConnect.addEventListener('click', connect);
+  el.btnAnalyze.addEventListener('click', analyzeOnce);
+  el.btnManual.addEventListener('click', ()=>setMode('manual'));
+  el.btnAuto.addEventListener('click',   ()=>setMode('auto'));
+
+  // bootstrap — mostra base url
+  document.getElementById('baseUrl').textContent = BASE_URL;
+
+  // dica: conecta na carga (opcional)
+  connect();
+})();
+</script>
+</body>
+</html>
