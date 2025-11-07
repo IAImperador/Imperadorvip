@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ImperadorVIP – Painel</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="card">
+    <h1>ImperadorVIP – Painel</h1>
+    <div class="row">
+      <label>Backend URL</label>
+      <input id="apiUrl" placeholder="http://localhost:8080" />
+    </div>
+    <div class="row">
+      <label>API_KEY</label>
+      <input id="apiKey" placeholder="sua api key" />
+    </div>
+    <div class="row">
+      <button id="btnStatus">Ver Status</button>
+      <button id="btnToggle">Alternar Bot</button>
+    </div>
+    <div class="row">
+      <label>Modo:</label>
+      <button data-mode="manual" class="mode">Manual</button>
+      <button data-mode="auto" class="mode">Auto (5 min)</button>
+    </div>
+    <div class="row">
+      <label>Mercado:</label>
+      <button data-market="open" class="market">Aberto</button>
+      <button data-market="otc" class="market">OTC</button>
+    </div>
+    <hr/>
+    <div class="row">
+      <label>Símbolo</label>
+      <input id="symbol" value="EUR/USD" />
+    </div>
+    <div class="row">
+      <label>Timeframe</label>
+      <select id="timeframe">
+        <option>1min</option>
+        <option selected>5min</option>
+        <option>15min</option>
+        <option>1h</option>
+      </select>
+    </div>
+    <div class="row">
+      <label>Confiança mínima</label>
+      <input id="minConf" type="number" value="90" min="50" max="99" />
+    </div>
+    <div class="row">
+      <button id="btnSignal">Gerar Sinal (Manual)</button>
+    </div>
+    <pre id="out"></pre>
+  </div>
+  <script src="script.js"></script>
+</body>
+</html>
